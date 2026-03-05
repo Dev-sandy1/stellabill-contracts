@@ -39,7 +39,7 @@ use crate::types::{
     BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD, BILLING_SNAPSHOT_FLAG_INTERVAL_CHARGED,
     BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
 };
-use crate::types::{Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus};
+use crate::types::LifetimeCapReachedEvent;
 use soroban_sdk::{symbol_short, Env, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
@@ -379,7 +379,6 @@ pub fn charge_one(
                 SubscriptionChargedEvent {
                     subscription_id,
                     merchant: sub.merchant.clone(),
-                    amount: net_amount,
                     amount: sub.amount,
                     lifetime_charged: sub.lifetime_charged,
                 },
