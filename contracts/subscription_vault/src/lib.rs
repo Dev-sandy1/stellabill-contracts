@@ -480,6 +480,21 @@ impl SubscriptionVault {
         )
     }
 
+    /// Configure the maximum number of concurrent active subscriptions a subscriber
+    /// may hold for a given plan template.
+    ///
+    /// When `max_active` is zero, no limit is enforced for that plan. This limit
+    /// is checked when creating subscriptions from the plan via
+    /// `create_subscription_from_plan`. Only the plan's merchant may call this.
+    pub fn set_plan_max_active_subs(
+        env: Env,
+        merchant: Address,
+        plan_template_id: u32,
+        max_active: u32,
+    ) -> Result<(), Error> {
+        subscription::do_set_plan_max_active_subs(&env, merchant, plan_template_id, max_active)
+    }
+
     /// Migrates an existing subscription to a newer version of the same plan template.
     ///
     /// The subscriber must authorize this call. Migration is only allowed between

@@ -1641,6 +1641,64 @@ fn test_plan_template_no_cap_creates_uncapped_sub() {
 }
 
 #[test]
+fn test_plan_max_concurrent_subscriptions_enforced_per_subscriber() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+
+    // Limit each subscriber to a single active subscription for this plan.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    // First subscription succeeds.
+    let _sub1 = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Second subscription for the same subscriber/plan is rejected.
+    let result = client.try_create_subscription_from_plan(&subscriber, &plan_id);
+    assert_eq!(result, Err(Ok(Error::MaxConcurrentSubscriptionsReached)));
+
+    // Another subscriber is unaffected by this limit.
+    let other_subscriber = Address::generate(&env);
+    let _sub_other = client.create_subscription_from_plan(&other_subscriber, &plan_id);
+}
+
+#[test]
+fn test_plan_max_concurrent_allows_new_after_cancellation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let sub1 = client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.cancel_subscription(&sub1, &subscriber);
+
+    // Because only ACTIVE subscriptions are counted, a new subscription is allowed
+    // after cancellation.
+    let sub2 = client.create_subscription_from_plan(&subscriber, &plan_id);
+    let sub = client.get_subscription(&sub2);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+}
+
+#[test]
 fn test_update_plan_template_creates_new_version_and_preserves_old() {
     let env = Env::default();
     env.mock_all_auths();

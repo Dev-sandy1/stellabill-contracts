@@ -121,6 +121,9 @@ pub enum Error {
     OraclePriceInvalid = 1022,
     /// The contract has allocated the maximum number of subscriptions.
     SubscriptionLimitReached = 429,
+    /// Subscriber has reached the maximum allowed number of active
+    /// subscriptions for this plan.
+    MaxConcurrentSubscriptionsReached = 1023,
 }
 
 impl Error {
@@ -155,6 +158,7 @@ impl Error {
             Error::OraclePriceStale => 1021,
             Error::OraclePriceInvalid => 1022,
             Error::SubscriptionLimitReached => 429,
+            Error::MaxConcurrentSubscriptionsReached => 1023,
         }
     }
 }

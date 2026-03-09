@@ -56,6 +56,64 @@ fn sub_plan_key(env: &Env, subscription_id: u32) -> (Symbol, u32) {
     (Symbol::new(env, "sub_plan"), subscription_id)
 }
 
+fn plan_max_active_key(env: &Env, plan_template_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "plan_max_active"), plan_template_id)
+}
+
+fn get_plan_max_active(env: &Env, plan_template_id: u32) -> u32 {
+    env.storage()
+        .instance()
+        .get(&plan_max_active_key(env, plan_template_id))
+        .unwrap_or(0)
+}
+
+fn count_active_subscriptions_for_plan(
+    env: &Env,
+    subscriber: &Address,
+    plan_template_id: u32,
+) -> Result<u32, Error> {
+    let next_id_key = Symbol::new(env, "next_id");
+    let next_id: u32 = env.storage().instance().get(&next_id_key).unwrap_or(0);
+
+    let mut count = 0u32;
+    let storage = env.storage().instance();
+
+    for id in 0..next_id {
+        let key = sub_plan_key(env, id);
+        let maybe_plan_id: Option<u32> = storage.get(&key);
+        if maybe_plan_id != Some(plan_template_id) {
+            continue;
+        }
+
+        if let Some(sub) = storage.get::<u32, Subscription>(&id) {
+            if &sub.subscriber == subscriber && sub.status == SubscriptionStatus::Active {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+fn enforce_plan_concurrency_limit(
+    env: &Env,
+    subscriber: &Address,
+    plan_template_id: u32,
+) -> Result<(), Error> {
+    let max_active = get_plan_max_active(env, plan_template_id);
+    // Zero means "no limit" for this plan.
+    if max_active == 0 {
+        return Ok(());
+    }
+
+    let current = count_active_subscriptions_for_plan(env, subscriber, plan_template_id)?;
+    if current >= max_active {
+        return Err(Error::MaxConcurrentSubscriptionsReached);
+    }
+
+    Ok(())
+}
+
 pub fn do_create_subscription(
     env: &Env,
     subscriber: Address,
@@ -423,6 +481,9 @@ pub fn do_create_subscription_from_plan(
 
     let plan = get_plan_template(env, plan_template_id)?;
 
+    // Enforce per-plan concurrency limit for this subscriber/plan pair.
+    enforce_plan_concurrency_limit(env, &subscriber, plan_template_id)?;
+
     let key = Symbol::new(env, "next_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
     env.storage().instance().set(&key, &(id + 1));
@@ -606,6 +667,26 @@ pub fn do_migrate_subscription_to_plan(
             timestamp: env.ledger().timestamp(),
         },
     );
+
+    Ok(())
+}
+
+pub fn do_set_plan_max_active_subs(
+    env: &Env,
+    merchant: Address,
+    plan_template_id: u32,
+    max_active: u32,
+) -> Result<(), Error> {
+    merchant.require_auth();
+
+    let plan = get_plan_template(env, plan_template_id)?;
+    if plan.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+
+    env.storage()
+        .instance()
+        .set(&plan_max_active_key(env, plan_template_id), &max_active);
 
     Ok(())
 }
