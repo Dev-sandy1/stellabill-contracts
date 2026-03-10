@@ -40,8 +40,9 @@ pub use types::{
     MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
     PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
     Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
-    SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus,
-    SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH, MAX_METADATA_VALUE_LENGTH,
+    SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
+    SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
+    MAX_METADATA_VALUE_LENGTH,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -935,10 +936,7 @@ impl SubscriptionVault {
         blocklist::do_remove_from_blocklist(&env, admin, subscriber)
     }
 
-    pub fn get_blocklist_entry(
-        env: Env,
-        subscriber: Address,
-    ) -> Result<BlocklistEntry, Error> {
+    pub fn get_blocklist_entry(env: Env, subscriber: Address) -> Result<BlocklistEntry, Error> {
         blocklist::get_blocklist_entry(&env, subscriber)
     }
 
