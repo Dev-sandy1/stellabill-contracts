@@ -20,7 +20,11 @@
 use crate::queries::get_subscription;
 use crate::safe_math::{safe_add_balance, validate_non_negative};
 use crate::state_machine::validate_status_transition;
-use crate::types::{DataKey, Error, PlanTemplate, Subscription, SubscriptionStatus};
+use crate::statements::append_statement;
+use crate::types::{
+    BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
+    Subscription, SubscriptionMigratedEvent, SubscriptionStatus,
+};
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
 #[allow(dead_code)]
@@ -44,6 +48,146 @@ pub fn get_plan_template(env: &Env, plan_template_id: u32) -> Result<PlanTemplat
     env.storage().instance().get(&key).ok_or(Error::NotFound)
 }
 
+fn sub_plan_key(env: &Env, subscription_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "sub_plan"), subscription_id)
+}
+
+fn plan_max_active_key(env: &Env, plan_template_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "plan_max_active"), plan_template_id)
+}
+
+fn get_plan_max_active(env: &Env, plan_template_id: u32) -> u32 {
+    env.storage()
+        .instance()
+        .get(&plan_max_active_key(env, plan_template_id))
+        .unwrap_or(0)
+}
+
+fn count_active_subscriptions_for_plan(
+    env: &Env,
+    subscriber: &Address,
+    plan_template_id: u32,
+) -> Result<u32, Error> {
+    let next_id_key = Symbol::new(env, "next_id");
+    let next_id: u32 = env.storage().instance().get(&next_id_key).unwrap_or(0);
+
+    let mut count = 0u32;
+    let storage = env.storage().instance();
+
+    for id in 0..next_id {
+        let key = sub_plan_key(env, id);
+        let maybe_plan_id: Option<u32> = storage.get(&key);
+        if maybe_plan_id != Some(plan_template_id) {
+            continue;
+        }
+
+        if let Some(sub) = storage.get::<u32, Subscription>(&id) {
+            if &sub.subscriber == subscriber && sub.status == SubscriptionStatus::Active {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+fn enforce_plan_concurrency_limit(
+    env: &Env,
+    subscriber: &Address,
+    plan_template_id: u32,
+) -> Result<(), Error> {
+    let max_active = get_plan_max_active(env, plan_template_id);
+    // Zero means "no limit" for this plan.
+    if max_active == 0 {
+        return Ok(());
+    }
+
+    let current = count_active_subscriptions_for_plan(env, subscriber, plan_template_id)?;
+    if current >= max_active {
+        return Err(Error::MaxConcurrentSubscriptionsReached);
+    }
+
+    Ok(())
+}
+
+fn credit_limit_key(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+) -> (Symbol, Address, Address) {
+    (
+        Symbol::new(env, "credit_limit"),
+        subscriber.clone(),
+        token.clone(),
+    )
+}
+
+fn get_subscriber_credit_limit_internal(env: &Env, subscriber: &Address, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&credit_limit_key(env, subscriber, token))
+        .unwrap_or(0)
+}
+
+fn compute_subscriber_exposure(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+) -> Result<i128, Error> {
+    let next_id_key = Symbol::new(env, "next_id");
+    let next_id: u32 = env.storage().instance().get(&next_id_key).unwrap_or(0);
+    let storage = env.storage().instance();
+
+    let mut exposure: i128 = 0;
+    for id in 0..next_id {
+        if let Some(sub) = storage.get::<u32, Subscription>(&id) {
+            if &sub.subscriber != subscriber || &sub.token != token {
+                continue;
+            }
+
+            // Base exposure: current prepaid balance.
+            exposure = exposure
+                .checked_add(sub.prepaid_balance)
+                .ok_or(Error::Overflow)?;
+
+            // For active subscriptions we also treat the next interval amount as expected liability.
+            if sub.status == SubscriptionStatus::Active {
+                exposure = exposure.checked_add(sub.amount).ok_or(Error::Overflow)?;
+            }
+        }
+    }
+
+    Ok(exposure)
+}
+
+fn enforce_credit_limit_for_delta(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+    additional_liability: i128,
+) -> Result<(), Error> {
+    // Zero or negative additions do not increase exposure.
+    if additional_liability <= 0 {
+        return Ok(());
+    }
+
+    let limit = get_subscriber_credit_limit_internal(env, subscriber, token);
+    // Zero means "no credit limit" configured.
+    if limit == 0 {
+        return Ok(());
+    }
+
+    let current = compute_subscriber_exposure(env, subscriber, token)?;
+    let new_exposure = current
+        .checked_add(additional_liability)
+        .ok_or(Error::Overflow)?;
+    if new_exposure > limit {
+        return Err(Error::CreditLimitExceeded);
+    }
+
+    Ok(())
+}
+
 pub fn do_create_subscription(
     env: &Env,
     subscriber: Address,
@@ -53,16 +197,41 @@ pub fn do_create_subscription(
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
+    let token = crate::admin::get_token(env)?;
+
+    // Enforce subscriber-level credit limit for this token before creating a new
+    // subscription with additional interval liability `amount`.
+    enforce_credit_limit_for_delta(env, &subscriber, &token, amount)?;
+    do_create_subscription_with_token(
+        env,
+        subscriber,
+        merchant,
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn do_create_subscription_with_token(
+    env: &Env,
+    subscriber: Address,
+    merchant: Address,
+    token: Address,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
     subscriber.require_auth();
-
-    // Blocklist check: prevent blocklisted subscribers from creating subscriptions
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
-
     validate_non_negative(amount)?;
 
     if interval_seconds == 0 {
+        return Err(Error::InvalidInput);
+    }
+    if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
     }
 
@@ -73,23 +242,19 @@ pub fn do_create_subscription(
         }
     }
 
-    let now = env.ledger().timestamp();
+    // Enforce credit limit for the token-specific subscription.
+    enforce_credit_limit_for_delta(env, &subscriber, &token, amount)?;
+
     let sub = Subscription {
         subscriber: subscriber.clone(),
         merchant: merchant.clone(),
+        token: token.clone(),
         amount,
         interval_seconds,
-        last_payment_timestamp: now,
+        last_payment_timestamp: env.ledger().timestamp(),
         status: SubscriptionStatus::Active,
         prepaid_balance: 0i128,
         usage_enabled,
-        expiration: None,
-        billing_anchor_timestamp: now,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap,
         lifetime_charged: 0i128,
     };
@@ -113,6 +278,16 @@ pub fn do_create_subscription(
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
     env.storage().instance().set(&merchant_key, &ids);
+
+    // Maintain token -> subscription-ID index
+    let token_key = (Symbol::new(env, "token_subs"), token);
+    let mut token_ids: Vec<u32> = env
+        .storage()
+        .instance()
+        .get(&token_key)
+        .unwrap_or(Vec::new(env));
+    token_ids.push_back(id);
+    env.storage().instance().set(&token_key, &token_ids);
 
     env.events().publish(
         (symbol_short!("created"), id),
@@ -141,7 +316,7 @@ pub fn do_deposit_funds(
         return Err(Error::SubscriberBlocklisted);
     }
 
-    // CHECKS
+    // CHECKS: Validate all preconditions before any state mutations
     let min_topup: i128 = crate::admin::get_min_topup(env)?;
     if amount < min_topup {
         return Err(Error::BelowMinimumTopup);
@@ -149,11 +324,10 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    let token_addr: Address = env
-        .storage()
-        .instance()
-        .get(&Symbol::new(env, "token"))
-        .ok_or(Error::NotInitialized)?;
+    let token_addr = sub.token.clone();
+
+    // Enforce credit limit for additional prepaid balance being loaded.
+    enforce_credit_limit_for_delta(env, &subscriber, &token_addr, amount)?;
 
     // EFFECTS
     sub.prepaid_balance = safe_add_balance(sub.prepaid_balance, amount)?;
@@ -263,6 +437,15 @@ pub fn do_charge_one_off(
         .ok_or(Error::Overflow)?;
 
     env.storage().instance().set(&subscription_id, &sub);
+    append_statement(
+        env,
+        subscription_id,
+        amount,
+        sub.merchant.clone(),
+        BillingChargeKind::OneOff,
+        env.ledger().timestamp(),
+        env.ledger().timestamp(),
+    );
     Ok(())
 }
 
@@ -288,11 +471,7 @@ pub fn do_withdraw_subscriber_funds(
         sub.prepaid_balance = 0;
         env.storage().instance().set(&subscription_id, &sub);
 
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(env, "token"))
-            .ok_or(Error::NotInitialized)?;
+        let token_addr = sub.token.clone();
         let token_client = soroban_sdk::token::Client::new(env, &token_addr);
 
         token_client.transfer(
@@ -301,6 +480,55 @@ pub fn do_withdraw_subscriber_funds(
             &amount_to_refund,
         );
     }
+
+    Ok(())
+}
+
+pub fn do_partial_refund(
+    env: &Env,
+    admin: Address,
+    subscription_id: u32,
+    subscriber: Address,
+    amount: i128,
+) -> Result<(), Error> {
+    super::require_admin_auth(env, &admin)?;
+
+    subscriber.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let mut sub = get_subscription(env, subscription_id)?;
+
+    if subscriber != sub.subscriber {
+        return Err(Error::Forbidden);
+    }
+
+    if amount > sub.prepaid_balance {
+        return Err(Error::InsufficientBalance);
+    }
+
+    // Effects: update internal state before performing external token transfer.
+    sub.prepaid_balance = sub
+        .prepaid_balance
+        .checked_sub(amount)
+        .ok_or(Error::Overflow)?;
+    env.storage().instance().set(&subscription_id, &sub);
+
+    // Interactions: transfer refund amount from contract to subscriber.
+    let token_addr = sub.token.clone();
+    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
+    token_client.transfer(&env.current_contract_address(), &subscriber, &amount);
+
+    env.events().publish(
+        (Symbol::new(env, "partial_refund"), subscription_id),
+        PartialRefundEvent {
+            subscription_id,
+            subscriber,
+            amount,
+        },
+    );
 
     Ok(())
 }
@@ -322,18 +550,58 @@ pub fn do_create_plan_template(
         }
     }
 
+    let token = crate::admin::get_token(env)?;
+    let plan_id = next_plan_id(env);
     let plan = PlanTemplate {
         merchant,
+        token,
         amount,
         interval_seconds,
         usage_enabled,
         lifetime_cap,
+        template_key: plan_id,
+        version: 1,
     };
 
-    let plan_id = next_plan_id(env);
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
 
+    Ok(plan_id)
+}
+
+pub fn do_create_plan_template_with_token(
+    env: &Env,
+    merchant: Address,
+    token: Address,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
+    merchant.require_auth();
+    if !crate::admin::is_token_accepted(env, &token) {
+        return Err(Error::InvalidInput);
+    }
+    if let Some(cap) = lifetime_cap {
+        if cap <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+    }
+
+    let plan_id = next_plan_id(env);
+    let plan = PlanTemplate {
+        merchant,
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+        template_key: plan_id,
+        version: 1,
+    };
+
+    let key = (Symbol::new(env, "plan"), plan_id);
+    env.storage().instance().set(&key, &plan);
     Ok(plan_id)
 }
 
@@ -344,14 +612,14 @@ pub fn do_create_subscription_from_plan(
 ) -> Result<u32, Error> {
     subscriber.require_auth();
 
-    // Blocklist check: prevent blocklisted subscribers from creating subscriptions
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
-
     let plan = get_plan_template(env, plan_template_id)?;
 
-    let now = env.ledger().timestamp();
+    // Enforce subscriber-level credit limit for the plan's token.
+    enforce_credit_limit_for_delta(env, &subscriber, &plan.token, plan.amount)?;
+
+    // Enforce per-plan concurrency limit for this subscriber/plan pair.
+    enforce_plan_concurrency_limit(env, &subscriber, plan_template_id)?;
+
     let key = Symbol::new(env, "next_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
     env.storage().instance().set(&key, &(id + 1));
@@ -359,24 +627,24 @@ pub fn do_create_subscription_from_plan(
     let sub = Subscription {
         subscriber: subscriber.clone(),
         merchant: plan.merchant.clone(),
+        token: plan.token.clone(),
         amount: plan.amount,
         interval_seconds: plan.interval_seconds,
-        last_payment_timestamp: now,
+        last_payment_timestamp: env.ledger().timestamp(),
         status: SubscriptionStatus::Active,
         prepaid_balance: 0i128,
         usage_enabled: plan.usage_enabled,
-        expiration: None,
-        billing_anchor_timestamp: now,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: plan.lifetime_cap,
         lifetime_charged: 0i128,
     };
 
     env.storage().instance().set(&id, &sub);
+
+    // Persist linkage between subscription and the plan template it was created from.
+    let sub_plan_storage_key = sub_plan_key(env, id);
+    env.storage()
+        .instance()
+        .set(&sub_plan_storage_key, &plan_template_id);
 
     // Maintain merchant -> subscription-ID index
     let merchant_key = DataKey::MerchantSubs(plan.merchant.clone());
@@ -388,49 +656,205 @@ pub fn do_create_subscription_from_plan(
     ids.push_back(id);
     env.storage().instance().set(&merchant_key, &ids);
 
+    // Maintain token -> subscription-ID index
+    let token_key = (Symbol::new(env, "token_subs"), plan.token);
+    let mut token_ids: Vec<u32> = env
+        .storage()
+        .instance()
+        .get(&token_key)
+        .unwrap_or(Vec::new(env));
+    token_ids.push_back(id);
+    env.storage().instance().set(&token_key, &token_ids);
+
     Ok(id)
 }
 
-pub fn do_set_usage_cap(
+pub fn do_update_plan_template(
     env: &Env,
-    subscription_id: u32,
-    authorizer: Address,
-    usage_cap_units: Option<i128>,
-) -> Result<(), Error> {
-    authorizer.require_auth();
-    let mut sub = get_subscription(env, subscription_id)?;
-    if authorizer != sub.merchant {
-        return Err(Error::Forbidden);
-    }
-    if let Some(cap) = usage_cap_units {
+    merchant: Address,
+    plan_template_id: u32,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
+    merchant.require_auth();
+
+    // Validate lifetime_cap if provided
+    if let Some(cap) = lifetime_cap {
         if cap <= 0 {
             return Err(Error::InvalidAmount);
         }
     }
-    sub.usage_cap_units = usage_cap_units;
+
+    let existing = get_plan_template(env, plan_template_id)?;
+    if existing.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+
+    // Do not allow changing token through versioning – that would be a different plan family.
+    let token = existing.token.clone();
+
+    let new_plan_id = next_plan_id(env);
+    let new_version = existing.version + 1;
+    let updated = PlanTemplate {
+        merchant: merchant.clone(),
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+        template_key: existing.template_key,
+        version: new_version,
+    };
+
+    let key = (Symbol::new(env, "plan"), new_plan_id);
+    env.storage().instance().set(&key, &updated);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "plan_template_updated"),
+            existing.template_key,
+        ),
+        PlanTemplateUpdatedEvent {
+            template_key: existing.template_key,
+            old_plan_id: plan_template_id,
+            new_plan_id,
+            version: new_version,
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(new_plan_id)
+}
+
+pub fn do_migrate_subscription_to_plan(
+    env: &Env,
+    subscriber: Address,
+    subscription_id: u32,
+    new_plan_template_id: u32,
+) -> Result<(), Error> {
+    subscriber.require_auth();
+
+    let mut sub = get_subscription(env, subscription_id)?;
+    if sub.subscriber != subscriber {
+        return Err(Error::Forbidden);
+    }
+
+    // Resolve the current plan the subscription is pinned to (if any).
+    let sub_plan_storage_key = sub_plan_key(env, subscription_id);
+    let current_plan_id: u32 = match env.storage().instance().get(&sub_plan_storage_key) {
+        Some(id) => id,
+        None => {
+            // Subscription was not created from a plan template – explicit migration required.
+            return Err(Error::InvalidInput);
+        }
+    };
+
+    let current_plan = get_plan_template(env, current_plan_id)?;
+    let new_plan = get_plan_template(env, new_plan_template_id)?;
+
+    // Enforce migration within the same logical template family.
+    if current_plan.template_key != new_plan.template_key {
+        return Err(Error::InvalidInput);
+    }
+
+    // Only allow upgrades to newer versions.
+    if new_plan.version <= current_plan.version {
+        return Err(Error::InvalidInput);
+    }
+
+    // For safety, do not allow token switches via migration.
+    if new_plan.token != sub.token {
+        return Err(Error::InvalidInput);
+    }
+
+    // Enforce compatibility of lifetime caps: cannot migrate into a cap that is already exceeded.
+    if let Some(cap) = new_plan.lifetime_cap {
+        if sub.lifetime_charged > cap {
+            return Err(Error::LifetimeCapReached);
+        }
+        sub.lifetime_cap = Some(cap);
+    } else {
+        // Removing a cap via migration is allowed; keeps existing lifetime_charged.
+        sub.lifetime_cap = None;
+    }
+
+    // Apply updated commercial terms from the new plan version.
+    sub.amount = new_plan.amount;
+    sub.interval_seconds = new_plan.interval_seconds;
+    sub.usage_enabled = new_plan.usage_enabled;
+
     env.storage().instance().set(&subscription_id, &sub);
+    env.storage()
+        .instance()
+        .set(&sub_plan_storage_key, &new_plan_template_id);
+
+    env.events().publish(
+        (Symbol::new(env, "subscription_migrated"), subscription_id),
+        SubscriptionMigratedEvent {
+            subscription_id,
+            template_key: new_plan.template_key,
+            from_plan_id: current_plan_id,
+            to_plan_id: new_plan_template_id,
+            merchant: new_plan.merchant,
+            subscriber,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
     Ok(())
 }
 
-pub fn do_set_usage_rate_limit(
+pub fn do_set_plan_max_active_subs(
     env: &Env,
-    subscription_id: u32,
-    authorizer: Address,
-    max_calls: Option<u32>,
-    window_seconds: u64,
+    merchant: Address,
+    plan_template_id: u32,
+    max_active: u32,
 ) -> Result<(), Error> {
-    authorizer.require_auth();
-    let mut sub = get_subscription(env, subscription_id)?;
-    if authorizer != sub.merchant {
+    merchant.require_auth();
+
+    let plan = get_plan_template(env, plan_template_id)?;
+    if plan.merchant != merchant {
         return Err(Error::Forbidden);
     }
-    if let Some(max) = max_calls {
-        if max == 0 || window_seconds == 0 {
-            return Err(Error::InvalidInput);
-        }
-    }
-    sub.usage_rate_limit_max_calls = max_calls;
-    sub.usage_rate_window_secs = window_seconds;
-    env.storage().instance().set(&subscription_id, &sub);
+
+    env.storage()
+        .instance()
+        .set(&plan_max_active_key(env, plan_template_id), &max_active);
+
     Ok(())
+}
+
+pub fn do_set_subscriber_credit_limit(
+    env: &Env,
+    admin: Address,
+    subscriber: Address,
+    token: Address,
+    limit: i128,
+) -> Result<(), Error> {
+    super::require_admin_auth(env, &admin)?;
+
+    if limit < 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    env.storage()
+        .instance()
+        .set(&credit_limit_key(env, &subscriber, &token), &limit);
+
+    Ok(())
+}
+
+pub fn get_subscriber_credit_limit(env: &Env, subscriber: Address, token: Address) -> i128 {
+    get_subscriber_credit_limit_internal(env, &subscriber, &token)
+}
+
+pub fn get_subscriber_exposure(
+    env: &Env,
+    subscriber: Address,
+    token: Address,
+) -> Result<i128, Error> {
+    compute_subscriber_exposure(env, &subscriber, &token)
 }

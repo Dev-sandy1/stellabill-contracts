@@ -175,39 +175,6 @@
                             },
                             {
                               "key": {
-                                "symbol": "billing_anchor_timestamp"
-                              },
-                              "val": {
-                                "u64": 1000
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "current_period_index"
-                              },
-                              "val": {
-                                "u32": 0
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "current_period_usage_units"
-                              },
-                              "val": {
-                                "i128": {
-                                  "hi": 0,
-                                  "lo": 0
-                                }
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "expiration"
-                              },
-                              "val": "void"
-                            },
-                            {
-                              "key": {
                                 "symbol": "interval_seconds"
                               },
                               "val": {
@@ -276,9 +243,11 @@
                             },
                             {
                               "key": {
-                                "symbol": "usage_cap_units"
+                                "symbol": "token"
                               },
-                              "val": "void"
+                              "val": {
+                                "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
+                              }
                             },
                             {
                               "key": {
@@ -287,20 +256,18 @@
                               "val": {
                                 "bool": false
                               }
-                            },
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "accepted_tokens"
+                        },
+                        "val": {
+                          "vec": [
                             {
-                              "key": {
-                                "symbol": "usage_rate_limit_max_calls"
-                              },
-                              "val": "void"
-                            },
-                            {
-                              "key": {
-                                "symbol": "usage_rate_window_secs"
-                              },
-                              "val": {
-                                "u64": 0
-                              }
+                              "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
                             }
                           ]
                         }
@@ -350,7 +317,33 @@
                       },
                       {
                         "key": {
-                          "symbol": "token_decimals"
+                          "vec": [
+                            {
+                              "symbol": "MerchantSubs"
+                            },
+                            {
+                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "u32": 0
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "token_decimals"
+                            },
+                            {
+                              "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
+                            }
+                          ]
                         },
                         "val": {
                           "u32": 6
@@ -360,10 +353,10 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "MerchantSubs"
+                              "symbol": "token_subs"
                             },
                             {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                              "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
                             }
                           ]
                         },

@@ -5,8 +5,16 @@
 #![allow(dead_code)]
 
 use crate::charge_core::charge_one;
-use crate::types::{BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
+use crate::types::{AcceptedToken, BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
 use soroban_sdk::{Address, Env, Symbol, Vec};
+
+fn accepted_tokens_key(env: &Env) -> Symbol {
+    Symbol::new(env, "accepted_tokens")
+}
+
+fn accepted_token_decimals_key(env: &Env, token: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "token_decimals"), token.clone())
+}
 
 pub fn do_init(
     env: &Env,
@@ -25,7 +33,10 @@ pub fn do_init(
     }
 
     instance.set(&Symbol::new(env, "token"), &token);
-    instance.set(&Symbol::new(env, "token_decimals"), &token_decimals);
+    instance.set(&accepted_token_decimals_key(env, &token), &token_decimals);
+    let mut tokens = Vec::new(env);
+    tokens.push_back(token.clone());
+    instance.set(&accepted_tokens_key(env), &tokens);
     instance.set(&Symbol::new(env, "admin"), &admin);
     instance.set(&Symbol::new(env, "min_topup"), &min_topup);
     instance.set(&Symbol::new(env, "grace_period"), &grace_period);
@@ -77,47 +88,6 @@ pub fn do_set_grace_period(env: &Env, admin: Address, grace_period: u64) -> Resu
     Ok(())
 }
 
-pub fn do_set_treasury(env: &Env, admin: Address, treasury: Address) -> Result<(), Error> {
-    admin.require_auth();
-    let stored = require_admin(env)?;
-    if admin != stored {
-        return Err(Error::Forbidden);
-    }
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, "treasury"), &treasury);
-    Ok(())
-}
-
-pub fn do_get_treasury(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "treasury"))
-        .ok_or(Error::TreasuryNotConfigured)
-}
-
-pub fn do_set_protocol_fee_bps(env: &Env, admin: Address, fee_bps: u32) -> Result<(), Error> {
-    admin.require_auth();
-    let stored = require_admin(env)?;
-    if admin != stored {
-        return Err(Error::Forbidden);
-    }
-    if fee_bps > 10_000 {
-        return Err(Error::InvalidFeeBps);
-    }
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, "protocol_fee_bps"), &fee_bps);
-    Ok(())
-}
-
-pub fn get_protocol_fee_bps(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "protocol_fee_bps"))
-        .unwrap_or(0)
-}
-
 pub fn get_grace_period(env: &Env) -> Result<u64, Error> {
     Ok(env
         .storage()
@@ -131,6 +101,85 @@ pub fn get_token(env: &Env) -> Result<Address, Error> {
         .instance()
         .get(&Symbol::new(env, "token"))
         .ok_or(Error::NotFound)
+}
+
+pub fn get_token_decimals(env: &Env, token: &Address) -> Result<u32, Error> {
+    env.storage()
+        .instance()
+        .get(&accepted_token_decimals_key(env, token))
+        .ok_or(Error::NotFound)
+}
+
+pub fn is_token_accepted(env: &Env, token: &Address) -> bool {
+    env.storage()
+        .instance()
+        .has(&accepted_token_decimals_key(env, token))
+}
+
+pub fn add_accepted_token(
+    env: &Env,
+    admin: Address,
+    token: Address,
+    decimals: u32,
+) -> Result<(), Error> {
+    admin.require_auth();
+    let stored = require_admin(env)?;
+    if admin != stored {
+        return Err(Error::Forbidden);
+    }
+
+    let storage = env.storage().instance();
+    if !storage.has(&accepted_token_decimals_key(env, &token)) {
+        let mut tokens: Vec<Address> = storage
+            .get(&accepted_tokens_key(env))
+            .unwrap_or(Vec::new(env));
+        tokens.push_back(token.clone());
+        storage.set(&accepted_tokens_key(env), &tokens);
+    }
+    storage.set(&accepted_token_decimals_key(env, &token), &decimals);
+    Ok(())
+}
+
+pub fn remove_accepted_token(env: &Env, admin: Address, token: Address) -> Result<(), Error> {
+    admin.require_auth();
+    let stored = require_admin(env)?;
+    if admin != stored {
+        return Err(Error::Forbidden);
+    }
+
+    let default_token = get_token(env)?;
+    if token == default_token {
+        return Err(Error::InvalidInput);
+    }
+
+    let storage = env.storage().instance();
+    storage.remove(&accepted_token_decimals_key(env, &token));
+
+    let tokens: Vec<Address> = storage
+        .get(&accepted_tokens_key(env))
+        .unwrap_or(Vec::new(env));
+    let mut next = Vec::new(env);
+    for t in tokens.iter() {
+        if t != token {
+            next.push_back(t);
+        }
+    }
+    storage.set(&accepted_tokens_key(env), &next);
+    Ok(())
+}
+
+pub fn list_accepted_tokens(env: &Env) -> Vec<AcceptedToken> {
+    let storage = env.storage().instance();
+    let tokens: Vec<Address> = storage
+        .get(&accepted_tokens_key(env))
+        .unwrap_or(Vec::new(env));
+    let mut out = Vec::new(env);
+    for token in tokens.iter() {
+        if let Some(decimals) = storage.get::<_, u32>(&accepted_token_decimals_key(env, &token)) {
+            out.push_back(AcceptedToken { token, decimals });
+        }
+    }
+    out
 }
 
 pub fn do_batch_charge(

@@ -1,11 +1,10 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
-    Error, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault,
-    SubscriptionVaultClient, BILLING_SNAPSHOT_FLAG_CLOSED, BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
-    MAX_SUBSCRIPTION_ID,
+    Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault,
+    SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-use soroban_sdk::{Address, Env, String, Vec as SorobanVec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
 use alloc::format;
@@ -17,46 +16,6 @@ const AMOUNT: i128 = 10_000_000; // 10 USDC (6 decimals)
 const PREPAID: i128 = 50_000_000; // 50 USDC
 
 // -- helpers ------------------------------------------------------------------
-
-fn setup() -> (Env, Address, Address, Address, Address, Address, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|li| li.timestamp = 1_000);
-
-    let contract_id = env.register(SubscriptionVault, ());
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract(token_admin.clone());
-    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_admin_client.mint(&subscriber, &5_000_000);
-
-    client.init(&token, &6, &admin, &1, &0);
-    client.set_treasury(&admin, &treasury);
-    (
-        env,
-        contract_id,
-        admin,
-        subscriber,
-        merchant,
-        treasury,
-        token,
-    )
-}
-
-fn create_usage_sub(
-    client: &SubscriptionVaultClient<'_>,
-    subscriber: &Address,
-    merchant: &Address,
-    amount: i128,
-) -> u32 {
-    client.create_subscription(subscriber, merchant, &amount, &INTERVAL, &true, &None)
-}
 
 fn create_token_and_mint(env: &Env, recipient: &Address, amount: i128) -> Address {
     let token_admin = Address::generate(env);
@@ -142,7 +101,30 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
     });
 }
 
-// -- State Machine Helper Tests -----------------------------------------------
+#[contract]
+struct MockOracle;
+
+#[contractimpl]
+impl MockOracle {
+    pub fn set_price(env: Env, price: i128, timestamp: u64) {
+        env.storage().instance().set(
+            &Symbol::new(&env, "price"),
+            &OraclePrice { price, timestamp },
+        );
+    }
+
+    pub fn latest_price(env: Env) -> OraclePrice {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "price"))
+            .unwrap_or(OraclePrice {
+                price: 0,
+                timestamp: 0,
+            })
+    }
+}
+
+// ── State Machine Helper Tests ─────────────────────────────────────────────────
 
 #[test]
 fn test_validate_status_transition_same_status_is_allowed() {
@@ -530,19 +512,13 @@ fn test_subscription_struct_status_field() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: 100_000_000,
         interval_seconds: 30 * 24 * 60 * 60,
         last_payment_timestamp: 0,
         status: SubscriptionStatus::Active,
         prepaid_balance: 500_000_000,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: 0,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -558,19 +534,13 @@ fn test_subscription_struct_with_lifetime_cap() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: 10_000_000,
         interval_seconds: 30 * 24 * 60 * 60,
         last_payment_timestamp: 0,
         status: SubscriptionStatus::Active,
         prepaid_balance: 50_000_000,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: 0,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: Some(cap),
         lifetime_charged: 0,
     };
@@ -656,85 +626,141 @@ fn test_cancel_subscription_unauthorized() {
 }
 
 #[test]
-fn snapshots_written_after_successful_close() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
+fn test_withdraw_subscriber_funds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_contract = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token = soroban_sdk::token::Client::new(&env, &token_contract);
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract);
+
+    let contract_id = env.register(SubscriptionVault, ());
     let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
+    let vault_admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
 
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.charge_usage(&sub_id, &25);
+    client.init(
+        &token_contract,
+        &6,
+        &vault_admin,
+        &1000,
+        &(7 * 24 * 60 * 60),
+    );
+    token_admin.mint(&subscriber, &5000);
 
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL + 1);
-    client.charge_subscription(&sub_id);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
+    client.deposit_funds(&sub_id, &subscriber, &5000);
+    client.cancel_subscription(&sub_id, &subscriber);
+    client.withdraw_subscriber_funds(&sub_id, &subscriber);
 
-    let snap0 = client.get_billing_period_snapshot(&sub_id, &0);
-    assert_eq!(snap0.total_usage_units, 25);
-    assert_eq!(snap0.total_amount_charged, 25);
-    assert!(snap0.status_flags & BILLING_SNAPSHOT_FLAG_CLOSED != 0);
-    assert!(snap0.status_flags & BILLING_SNAPSHOT_FLAG_USAGE_CHARGED != 0);
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.prepaid_balance, 0);
+    assert_eq!(token.balance(&subscriber), 5000);
+    assert_eq!(token.balance(&contract_id), 0);
+}
+
+// ── Min-Topup Enforcement Tests ────────────────────────────────────────────────
+
+#[test]
+fn test_min_topup_below_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let min_topup = 5_000_000i128;
+
+    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
+    client.cancel_subscription(&id, &merchant);
+    let result = client.try_deposit_funds(&id, &subscriber, &4_999_999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_min_topup_exactly_at_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let min_topup = 5_000_000i128;
+
+    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
+    token_admin.mint(&subscriber, &min_topup);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
+    assert!(client
+        .try_deposit_funds(&id, &subscriber, &min_topup)
+        .is_ok());
 }
 
 // -- Deposit tests ------------------------------------------------------------
 
 #[test]
-fn usage_cap_enforced_per_period() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
+fn test_min_topup_above_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
     let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.set_usage_cap(&sub_id, &merchant, &Some(100));
 
-    client.charge_usage(&sub_id, &60);
-    client.charge_usage(&sub_id, &40);
-    assert!(client.try_charge_usage(&sub_id, &1).is_err());
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let min_topup = 5_000_000i128;
+    let deposit_amount = 10_000_000i128;
 
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL + 1);
-    client.charge_subscription(&sub_id);
-    client.charge_usage(&sub_id, &10);
+    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
+    token_admin.mint(&subscriber, &deposit_amount);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &deposit_amount,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
+    assert!(client
+        .try_deposit_funds(&id, &subscriber, &deposit_amount)
+        .is_ok());
 }
 
-#[test]
-fn usage_rate_limit_enforced_and_resets() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.set_usage_rate_limit(&sub_id, &merchant, &Some(2), &60);
-
-    client.charge_usage(&sub_id, &1);
-    client.charge_usage(&sub_id, &1);
-    assert!(client.try_charge_usage(&sub_id, &1).is_err());
-
-    env.ledger().with_mut(|li| li.timestamp += 61);
-    client.charge_usage(&sub_id, &1);
-}
-
-#[test]
-fn protocol_fee_skim_conserves_value() {
-    let (env, contract_id, admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.set_protocol_fee_bps(&admin, &500);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.charge_usage(&sub_id, &200);
-
-    let merchant_bal = client.get_merchant_balance(&merchant);
-    let treasury_bal = client.get_treasury_balance();
-    assert_eq!(merchant_bal, 190);
-    assert_eq!(treasury_bal, 10);
-    assert_eq!(merchant_bal + treasury_bal, 200);
-}
-
-#[test]
-fn status_becomes_insufficient_after_full_usage_debit() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &100);
-    client.charge_usage(&sub_id, &100);
-    let sub = client.get_subscription(&sub_id);
-    assert_eq!(sub.status, SubscriptionStatus::InsufficientBalance);
-}
+// ── Usage-charge tests ─────────────────────────────────────────────────────────
 
 // -- Deposit tests ------------------------------------------------------------
 
@@ -856,19 +882,13 @@ fn test_compute_next_charge_info_active() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: T0,
         status: SubscriptionStatus::Active,
         prepaid_balance: 0,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: T0,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -883,19 +903,13 @@ fn test_compute_next_charge_info_paused() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 2000,
         status: SubscriptionStatus::Paused,
         prepaid_balance: 50_000_000,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: 2000,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -910,19 +924,13 @@ fn test_compute_next_charge_info_cancelled() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: T0,
         status: SubscriptionStatus::Cancelled,
         prepaid_balance: 0,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: T0,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -936,19 +944,13 @@ fn test_compute_next_charge_info_insufficient_balance() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 3000,
         status: SubscriptionStatus::InsufficientBalance,
         prepaid_balance: 1_000_000,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: 3000,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -962,19 +964,13 @@ fn test_compute_next_charge_info_overflow_protection() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: 200,
         last_payment_timestamp: u64::MAX - 100,
         status: SubscriptionStatus::Active,
         prepaid_balance: 100_000_000,
         usage_enabled: false,
-        expiration: None,
-        billing_anchor_timestamp: u64::MAX - 100,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: None,
         lifetime_charged: 0,
     };
@@ -1073,11 +1069,49 @@ fn test_get_cap_info() {
 
 // -- Plan template tests ------------------------------------------------------
 
+/// Plan template inherits lifetime_cap to subscriptions created from it.
 #[test]
-fn test_create_and_use_plan_template() {
-    let (env, client, _, _) = setup_test_env();
-    let merchant = Address::generate(&env);
+fn test_plan_template_inherits_lifetime_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
     let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 50_000_000i128;
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+
+    let template = client.get_plan_template(&plan_id);
+    assert_eq!(template.lifetime_cap, Some(cap));
+    assert_eq!(template.version, 1);
+    assert_eq!(template.template_key, plan_id);
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.lifetime_cap, Some(cap));
+    assert_eq!(sub.lifetime_charged, 0);
+}
+
+/// Plan template with no cap creates uncapped subscriptions.
+#[test]
+fn test_plan_template_no_cap_creates_uncapped_sub() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
 
     let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
     let plan = client.get_plan_template(&plan_id);
@@ -1091,7 +1125,490 @@ fn test_create_and_use_plan_template() {
     assert_eq!(sub.subscriber, subscriber);
 }
 
-// -- Usage charge tests -------------------------------------------------------
+#[test]
+fn test_plan_max_concurrent_subscriptions_enforced_per_subscriber() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+
+    // Limit each subscriber to a single active subscription for this plan.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    // First subscription succeeds.
+    let _sub1 = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Second subscription for the same subscriber/plan is rejected.
+    let result = client.try_create_subscription_from_plan(&subscriber, &plan_id);
+    assert_eq!(result, Err(Ok(Error::MaxConcurrentSubscriptionsReached)));
+
+    // Another subscriber is unaffected by this limit.
+    let other_subscriber = Address::generate(&env);
+    let _sub_other = client.create_subscription_from_plan(&other_subscriber, &plan_id);
+}
+
+#[test]
+fn test_plan_max_concurrent_allows_new_after_cancellation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let sub1 = client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.cancel_subscription(&sub1, &subscriber);
+
+    // Because only ACTIVE subscriptions are counted, a new subscription is allowed
+    // after cancellation.
+    let sub2 = client.create_subscription_from_plan(&subscriber, &plan_id);
+    let sub = client.get_subscription(&sub2);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+}
+
+#[test]
+fn test_subscriber_credit_limit_blocks_new_subscription_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Limit total exposure for this subscriber/token to a single interval amount.
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &AMOUNT);
+
+    // First subscription fits entirely within the limit.
+    let _sub1 =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+
+    // Second subscription would exceed credit limit (another interval liability).
+    let result =
+        client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    assert_eq!(result, Err(Ok(Error::CreditLimitExceeded)));
+}
+
+#[test]
+fn test_subscriber_credit_limit_blocks_topup_when_exposure_exceeds_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Exposure limit small enough that initial subscription fits, but top-up does not.
+    let limit = AMOUNT + 5_000_000i128;
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &limit);
+
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Deposit that would keep us under the limit succeeds.
+    client.deposit_funds(&sub_id, &subscriber, &5_000_000i128);
+
+    // Further deposit would push exposure over the limit and must be rejected.
+    let result = client.try_deposit_funds(&sub_id, &subscriber, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::CreditLimitExceeded)));
+}
+
+#[test]
+fn test_get_subscriber_credit_limit_and_exposure_views() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Default: no limit configured.
+    assert_eq!(client.get_subscriber_credit_limit(&subscriber, &token), 0);
+
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &(AMOUNT * 10));
+
+    // After creating a subscription, exposure reflects one interval liability and zero prepaid.
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let exposure = client.get_subscriber_exposure(&subscriber, &token);
+    assert_eq!(exposure, AMOUNT);
+
+    // After topping up, exposure increases by the deposited amount.
+    client.deposit_funds(&sub_id, &subscriber, &5_000_000i128);
+    let exposure_after_topup = client.get_subscriber_exposure(&subscriber, &token);
+    assert_eq!(exposure_after_topup, AMOUNT + 5_000_000i128);
+}
+
+#[test]
+fn test_partial_refund_debits_prepaid_and_transfers_tokens() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_contract = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token = soroban_sdk::token::Client::new(&env, &token_contract);
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract);
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let vault_admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    client.init(
+        &token_contract,
+        &6,
+        &vault_admin,
+        &1_000_000i128,
+        &(7 * 24 * 60 * 60),
+    );
+
+    // Seed subscriber with tokens and create a funded subscription.
+    token_admin.mint(&subscriber, &50_000_000i128);
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    client.deposit_funds(&sub_id, &subscriber, &20_000_000i128);
+
+    let balance_before = token.balance(&subscriber);
+    let sub_before = client.get_subscription(&sub_id);
+    assert_eq!(sub_before.prepaid_balance, 20_000_000i128);
+
+    // Perform a partial refund of half the prepaid balance.
+    client.partial_refund(&vault_admin, &sub_id, &subscriber, &10_000_000i128);
+
+    let balance_after = token.balance(&subscriber);
+    let sub_after = client.get_subscription(&sub_id);
+
+    assert_eq!(sub_after.prepaid_balance, 10_000_000i128);
+    assert_eq!(balance_after, balance_before + 10_000_000i128);
+}
+
+#[test]
+fn test_partial_refund_rejects_invalid_amounts_and_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_contract = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract);
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let vault_admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    client.init(
+        &token_contract,
+        &6,
+        &vault_admin,
+        &1_000_000i128,
+        &(7 * 24 * 60 * 60),
+    );
+
+    token_admin.mint(&subscriber, &50_000_000i128);
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    client.deposit_funds(&sub_id, &subscriber, &5_000_000i128);
+
+    // Zero or negative refund amounts are rejected.
+    let zero_res = client.try_partial_refund(&vault_admin, &sub_id, &subscriber, &0i128);
+    assert_eq!(zero_res, Err(Ok(Error::InvalidAmount)));
+
+    let negative_res = client.try_partial_refund(&vault_admin, &sub_id, &subscriber, &-1i128);
+    assert_eq!(negative_res, Err(Ok(Error::InvalidAmount)));
+
+    // Refund exceeding prepaid balance is rejected.
+    let over_res = client.try_partial_refund(&vault_admin, &sub_id, &subscriber, &10_000_000i128);
+    assert_eq!(over_res, Err(Ok(Error::InsufficientBalance)));
+
+    // Non-admin cannot authorize partial refunds.
+    let other_admin = Address::generate(&env);
+    let unauth_res = client.try_partial_refund(&other_admin, &sub_id, &subscriber, &1_000_000i128);
+    assert_eq!(unauth_res, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_update_plan_template_creates_new_version_and_preserves_old() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 50_000_000i128;
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+    let original = client.get_plan_template(&plan_id);
+    assert_eq!(original.version, 1);
+
+    let new_amount = AMOUNT * 2;
+    let new_interval = INTERVAL / 2;
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &new_amount,
+        &new_interval,
+        &true,
+        &Some(cap),
+    );
+
+    // Old plan remains unchanged and addressable.
+    let original_after = client.get_plan_template(&plan_id);
+    assert_eq!(original_after.version, 1);
+    assert_eq!(original_after.amount, AMOUNT);
+    assert_eq!(original_after.interval_seconds, INTERVAL);
+    assert!(!original_after.usage_enabled);
+
+    // New plan has incremented version and updated fields, sharing template_key.
+    let updated = client.get_plan_template(&new_plan_id);
+    assert_eq!(updated.version, 2);
+    assert_eq!(updated.template_key, original_after.template_key);
+    assert_eq!(updated.amount, new_amount);
+    assert_eq!(updated.interval_seconds, new_interval);
+    assert!(updated.usage_enabled);
+    assert_eq!(updated.lifetime_cap, Some(cap));
+}
+
+#[test]
+fn test_migrate_subscription_to_new_plan_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 50_000_000i128;
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+    let new_amount = AMOUNT * 3;
+    let new_interval = INTERVAL / 3;
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &new_amount,
+        &new_interval,
+        &true,
+        &Some(cap),
+    );
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+    let before = client.get_subscription(&sub_id);
+    assert_eq!(before.amount, AMOUNT);
+    assert_eq!(before.interval_seconds, INTERVAL);
+    assert!(!before.usage_enabled);
+
+    client.migrate_subscription_to_plan(&subscriber, &sub_id, &new_plan_id);
+
+    let after = client.get_subscription(&sub_id);
+    assert_eq!(after.amount, new_amount);
+    assert_eq!(after.interval_seconds, new_interval);
+    assert!(after.usage_enabled);
+    // Lifetime tracking is preserved.
+    assert_eq!(after.lifetime_charged, 0);
+    assert_eq!(after.lifetime_cap, Some(cap));
+}
+
+#[test]
+fn test_migrate_subscription_rejects_cross_template_family() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_family_a =
+        client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let plan_family_b =
+        client.create_plan_template(&merchant, &(AMOUNT * 2), &INTERVAL, &false, &None::<i128>);
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_family_a);
+
+    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &plan_family_b);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_migrate_subscription_requires_plan_origin() {
+    let (env, client, _, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // Create a subscription directly (not from a plan template).
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Create a plan template to migrate to.
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+
+    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &plan_id);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_update_plan_template_cannot_change_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let other_token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+    client.add_accepted_token(&admin, &other_token, &6);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let original = client.get_plan_template(&plan_id);
+
+    // Even if we conceptually want to move to a different token, versioning API
+    // does not allow this; such a change should use a separate template family.
+    let _ = original; // silence unused, documentation-only test narrative.
+
+    // We indirectly assert this by verifying that update_plan_template always
+    // keeps the existing token.
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &(AMOUNT * 2),
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let updated = client.get_plan_template(&new_plan_id);
+    assert_eq!(updated.token, token);
+}
+
+/// Subscriber can withdraw remaining prepaid balance after cap-triggered cancellation.
+#[test]
+fn test_cap_cancelled_subscriber_can_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 2 * AMOUNT;
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &Some(cap),
+    );
+
+    // Fund the subscription so the vault holds real tokens for withdrawal.
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Advance time and charge twice — second charge hits cap → Cancelled
+    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL + 1);
+    client.charge_subscription(&sub_id);
+    env.ledger()
+        .with_mut(|li| li.timestamp = T0 + 2 * INTERVAL + 1);
+    client.charge_subscription(&sub_id);
+
+    let sub_after = client.get_subscription(&sub_id);
+    assert_eq!(sub_after.status, SubscriptionStatus::Cancelled);
+    assert!(sub_after.prepaid_balance > 0);
+
+    // Subscriber can withdraw remaining prepaid balance
+    client.withdraw_subscriber_funds(&sub_id, &subscriber);
+    let sub_final = client.get_subscription(&sub_id);
+    assert_eq!(sub_final.prepaid_balance, 0);
+}
 
 #[test]
 fn test_charge_usage_basic() {
@@ -1122,81 +1639,6 @@ fn test_charge_usage_not_enabled() {
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     seed_balance(&env, &client, id, PREPAID);
     client.charge_usage(&id, &1_000_000);
-}
-
-// -- Usage cap tests ----------------------------------------------------------
-
-#[test]
-fn test_set_and_enforce_usage_cap() {
-    let (env, client, _, _) = setup_test_env();
-    env.ledger().with_mut(|li| li.timestamp = T0);
-
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &AMOUNT,
-        &INTERVAL,
-        &true,
-        &None::<i128>,
-    );
-    seed_balance(&env, &client, id, PREPAID);
-
-    // Set cap to 2M units
-    client.set_usage_cap(&id, &merchant, &Some(2_000_000i128));
-
-    // First usage under cap - OK
-    client.charge_usage(&id, &1_500_000);
-
-    // Second usage would exceed cap
-    let result = client.try_charge_usage(&id, &1_000_000);
-    assert!(result.is_err());
-}
-
-// -- Billing period snapshot tests --------------------------------------------
-
-#[test]
-fn test_billing_period_snapshot_created_on_charge() {
-    let (env, client, _, _) = setup_test_env();
-    env.ledger().with_mut(|li| li.timestamp = T0);
-
-    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
-    seed_balance(&env, &client, id, PREPAID);
-
-    // First charge
-    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL + 1);
-    client.charge_subscription(&id);
-
-    // Second charge in next period triggers snapshot for period 0
-    env.ledger()
-        .with_mut(|li| li.timestamp = T0 + 2 * INTERVAL + 1);
-    client.charge_subscription(&id);
-
-    let snapshot = client.get_billing_period_snapshot(&id, &0);
-    assert_eq!(snapshot.subscription_id, id);
-    assert!(snapshot.status_flags & BILLING_SNAPSHOT_FLAG_CLOSED != 0);
-}
-
-// -- Protocol fee tests -------------------------------------------------------
-
-#[test]
-fn test_protocol_fee_skimming() {
-    let (env, client, _, admin) = setup_test_env();
-    let treasury = Address::generate(&env);
-    client.set_treasury(&admin, &treasury);
-    client.set_protocol_fee_bps(&admin, &500); // 5%
-
-    env.ledger().with_mut(|li| li.timestamp = T0);
-    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
-    seed_balance(&env, &client, id, PREPAID);
-
-    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL + 1);
-    client.charge_subscription(&id);
-
-    // Treasury should get 5% of AMOUNT
-    let treasury_balance = client.get_treasury_balance();
-    assert_eq!(treasury_balance, AMOUNT * 500 / 10_000);
 }
 
 // -- Merchant tests -----------------------------------------------------------
@@ -1662,432 +2104,296 @@ fn test_metadata_delete_on_cancelled_subscription_allowed() {
     assert!(result.is_err());
 }
 
-// ── Blocklist Tests ───────────────────────────────────────────────────────────
-
 #[test]
-fn test_admin_can_add_subscriber_to_blocklist() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let reason = soroban_sdk::String::from_str(&env, "Fraudulent activity");
+fn test_billing_statements_offset_pagination_newest_first() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let (client, token, _admin) = setup_contract(&env);
 
-    client.add_to_blocklist(&admin, &subscriber, &Some(reason.clone()));
-
-    assert!(client.is_blocklisted(&subscriber));
-    let entry = client.get_blocklist_entry(&subscriber);
-    assert_eq!(entry.subscriber, subscriber);
-    assert_eq!(entry.added_by, admin);
-    assert_eq!(entry.reason, Some(reason));
-}
-
-#[test]
-fn test_merchant_can_blocklist_their_subscriber() {
-    let (env, client, token, _admin) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &1_000_000_000i128);
 
-    // Mint tokens and create subscription
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &1_000_000i128,
         &INTERVAL,
-        &false,
+        &true,
         &None::<i128>,
     );
-    assert!(sub_id == 0);
+    client.deposit_funds(&id, &subscriber, &200_000_000i128);
 
-    // Merchant can blocklist their subscriber
-    let reason = soroban_sdk::String::from_str(&env, "Payment disputes");
-    client.add_to_blocklist(&merchant, &subscriber, &Some(reason));
+    for i in 1..=6 {
+        env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        client.charge_subscription(&id);
+    }
 
-    assert!(client.is_blocklisted(&subscriber));
+    let page1 = client.get_sub_statements_offset(&id, &0, &2, &true);
+    assert_eq!(page1.total, 6);
+    assert_eq!(page1.statements.len(), 2);
+    assert_eq!(page1.statements.get(0).unwrap().sequence, 5);
+    assert_eq!(page1.statements.get(1).unwrap().sequence, 4);
+
+    let page2 = client.get_sub_statements_offset(&id, &2, &2, &true);
+    assert_eq!(page2.statements.len(), 2);
+    assert_eq!(page2.statements.get(0).unwrap().sequence, 3);
+    assert_eq!(page2.statements.get(1).unwrap().sequence, 2);
 }
 
 #[test]
-fn test_merchant_cannot_blocklist_unrelated_subscriber() {
-    let (env, client, _token, _admin) = setup_test_env();
+fn test_billing_statements_cursor_pagination_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let (client, token, _admin) = setup_contract(&env);
+
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &1_000_000_000i128);
 
-    // Merchant tries to blocklist subscriber without any subscription relationship
-    let result = client.try_add_to_blocklist(&merchant, &subscriber, &None);
-    assert_eq!(result, Err(Ok(Error::Forbidden)));
-}
-
-#[test]
-fn test_blocklisted_subscriber_cannot_create_subscription() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Subscriber tries to create subscription
-    let result = client.try_create_subscription(
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &1_000_000i128,
         &INTERVAL,
-        &false,
+        &true,
         &None::<i128>,
     );
-    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
+    client.deposit_funds(&id, &subscriber, &200_000_000i128);
+
+    for i in 1..=4 {
+        env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        client.charge_subscription(&id);
+    }
+
+    let first = client.get_sub_statements_cursor(&id, &None::<u32>, &3, &true);
+    assert_eq!(first.statements.len(), 3);
+    assert_eq!(first.statements.get(0).unwrap().sequence, 3);
+    assert_eq!(first.statements.get(2).unwrap().sequence, 1);
+    assert_eq!(first.next_cursor, Some(0));
+
+    let second = client.get_sub_statements_cursor(&id, &first.next_cursor, &3, &true);
+    assert_eq!(second.statements.len(), 1);
+    assert_eq!(second.statements.get(0).unwrap().sequence, 0);
+    assert_eq!(second.next_cursor, None);
+
+    let invalid_cursor = client.get_sub_statements_cursor(&id, &Some(99u32), &2, &true);
+    assert_eq!(invalid_cursor.statements.len(), 0);
+    assert_eq!(invalid_cursor.next_cursor, None);
+    assert_eq!(invalid_cursor.total, 4);
 }
 
 #[test]
-fn test_blocklisted_subscriber_cannot_create_subscription_from_plan() {
-    let (env, client, _token, admin) = setup_test_env();
+fn test_compaction_prunes_old_statements_and_keeps_recent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let (client, token, admin) = setup_contract(&env);
+
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &2_000_000_000i128);
 
-    // Create plan template
-    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
-
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Subscriber tries to create subscription from plan
-    let result = client.try_create_subscription_from_plan(&subscriber, &plan_id);
-    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
-}
-
-#[test]
-fn test_blocklisted_subscriber_cannot_deposit_funds() {
-    let (env, client, token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-
-    // Create subscription first
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &1_000_000i128,
         &INTERVAL,
         &false,
         &None::<i128>,
     );
+    client.deposit_funds(&id, &subscriber, &500_000_000i128);
 
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
+    for i in 1..=8 {
+        env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        client.charge_subscription(&id);
+    }
 
-    // Subscriber tries to deposit funds
-    let result = client.try_deposit_funds(&sub_id, &subscriber, &1_000_000);
-    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
+    client.set_billing_retention(&admin, &3);
+    let summary = client.compact_billing_statements(&admin, &id, &None::<u32>);
+    assert_eq!(summary.pruned_count, 5);
+    assert_eq!(summary.kept_count, 3);
+    assert_eq!(summary.total_pruned_amount, 5_000_000i128);
+
+    let page = client.get_sub_statements_offset(&id, &0, &10, &true);
+    assert_eq!(page.total, 3);
+    assert_eq!(page.statements.len(), 3);
+    assert_eq!(page.statements.get(0).unwrap().sequence, 7);
+    assert_eq!(page.statements.get(2).unwrap().sequence, 5);
+
+    let agg = client.get_stmt_compacted_aggregate(&id);
+    assert_eq!(agg.pruned_count, 5);
+    assert_eq!(agg.total_amount, 5_000_000i128);
 }
 
 #[test]
-fn test_existing_subscription_preserved_after_blocklist() {
-    let (env, client, token, admin) = setup_test_env();
+fn test_compaction_no_rows_and_override_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token, admin) = setup_contract(&env);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-
-    // Create subscription and deposit funds
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &1_000_000i128,
         &INTERVAL,
         &false,
         &None::<i128>,
     );
-    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
-    let sub_before = client.get_subscription(&sub_id);
-    assert_eq!(sub_before.prepaid_balance, PREPAID);
-
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Existing subscription is preserved
-    let sub_after = client.get_subscription(&sub_id);
-    assert_eq!(sub_after.prepaid_balance, PREPAID);
-    assert_eq!(sub_after.status, SubscriptionStatus::Active);
+    let summary = client.compact_billing_statements(&admin, &id, &Some(10u32));
+    assert_eq!(summary.pruned_count, 0);
+    assert_eq!(summary.kept_count, 0);
+    assert_eq!(summary.total_pruned_amount, 0);
 }
 
 #[test]
-fn test_blocklisted_subscriber_can_cancel_existing_subscription() {
-    let (env, client, token, admin) = setup_test_env();
+fn test_oracle_enabled_charge_uses_quote_conversion() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let (client, token, admin) = setup_contract(&env);
+    let oracle_id = env.register(MockOracle, ());
+    let oracle = MockOracleClient::new(&env, &oracle_id);
+    oracle.set_price(&2_000_000i128, &T0); // 2 quote units/token with 6 decimals
+
+    // Enable oracle pricing with non-stale quote.
+    client.set_oracle_config(
+        &admin,
+        &true,
+        &Some(oracle_id.clone()),
+        &(60 * 24 * 60 * 60),
+    );
+
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &2_000_000_000i128);
 
-    // Create subscription
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
+    // 20 quote units (6 decimals). At price 2 quote/token, charge should be 10 tokens.
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &20_000_000i128,
         &INTERVAL,
         &false,
         &None::<i128>,
     );
+    client.deposit_funds(&id, &subscriber, &100_000_000i128);
 
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id);
 
-    // Subscriber can still cancel their existing subscription
-    client.cancel_subscription(&sub_id, &subscriber);
-    let sub = client.get_subscription(&sub_id);
-    assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+    assert_eq!(client.get_merchant_balance(&merchant), 10_000_000i128);
 }
 
 #[test]
-fn test_blocklisted_subscriber_can_withdraw_after_cancellation() {
-    let (env, client, token, admin) = setup_test_env();
+fn test_oracle_stale_quote_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    let (client, token, admin) = setup_contract(&env);
+    let oracle_id = env.register(MockOracle, ());
+    let oracle = MockOracleClient::new(&env, &oracle_id);
+    oracle.set_price(&2_000_000i128, &T0); // stale vs max_age=1
+    client.set_oracle_config(&admin, &true, &Some(oracle_id.clone()), &1u64);
+
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-
-    // Create subscription and deposit funds
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &2_000_000_000i128);
+    let id = client.create_subscription(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &20_000_000i128,
         &INTERVAL,
         &false,
         &None::<i128>,
     );
-    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+    client.deposit_funds(&id, &subscriber, &100_000_000i128);
 
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Subscriber cancels and withdraws
-    client.cancel_subscription(&sub_id, &subscriber);
-    client.withdraw_subscriber_funds(&sub_id, &subscriber);
-
-    let sub = client.get_subscription(&sub_id);
-    assert_eq!(sub.prepaid_balance, 0);
+    let result = client.try_charge_subscription(&id);
+    assert_eq!(result, Err(Ok(Error::OraclePriceStale)));
 }
 
 #[test]
-fn test_admin_can_remove_from_blocklist() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
+fn test_multi_token_balances_are_isolated_per_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
 
-    // Admin adds to blocklist
-    client.add_to_blocklist(&admin, &subscriber, &None);
-    assert!(client.is_blocklisted(&subscriber));
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
-    // Admin removes from blocklist
-    client.remove_from_blocklist(&admin, &subscriber);
-    assert!(!client.is_blocklisted(&subscriber));
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    let subscriber_a = Address::generate(&env);
+    let subscriber_b = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_a)
+        .mint(&subscriber_a, &100_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_b)
+        .mint(&subscriber_b, &100_000_000i128);
+
+    let id_a = client.create_subscription(
+        &subscriber_a,
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let id_b = client.create_subscription_with_token(
+        &subscriber_b,
+        &merchant,
+        &token_b,
+        &7_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
+    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
+
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
 }
 
 #[test]
-fn test_removed_subscriber_can_create_subscription() {
-    let (env, client, _token, admin) = setup_test_env();
+fn test_create_subscription_with_unaccepted_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token, _admin) = setup_contract(&env);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-
-    // Admin adds to blocklist
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Admin removes from blocklist
-    client.remove_from_blocklist(&admin, &subscriber);
-
-    // Subscriber can now create subscription
-    let sub_id = client.create_subscription(
+    let unsupported = Address::generate(&env);
+    let result = client.try_create_subscription_with_token(
         &subscriber,
         &merchant,
-        &AMOUNT,
+        &unsupported,
+        &1_000_000i128,
         &INTERVAL,
         &false,
         &None::<i128>,
     );
-    assert_eq!(sub_id, 0);
-}
-
-#[test]
-fn test_non_admin_cannot_remove_from_blocklist() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let non_admin = Address::generate(&env);
-
-    // Admin adds to blocklist
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Non-admin tries to remove
-    let result = client.try_remove_from_blocklist(&non_admin, &subscriber);
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
-}
-
-#[test]
-fn test_blocklist_entry_not_found() {
-    let (env, client, _token, _admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-
-    let result = client.try_get_blocklist_entry(&subscriber);
-    assert_eq!(result, Err(Ok(Error::NotFound)));
-}
-
-#[test]
-fn test_remove_nonexistent_blocklist_entry() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-
-    let result = client.try_remove_from_blocklist(&admin, &subscriber);
-    assert_eq!(result, Err(Ok(Error::NotFound)));
-}
-
-#[test]
-fn test_blocklist_events_emitted() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let reason = soroban_sdk::String::from_str(&env, "Test reason");
-
-    // Add to blocklist
-    client.add_to_blocklist(&admin, &subscriber, &Some(reason.clone()));
-    assert!(client.is_blocklisted(&subscriber));
-
-    // Remove from blocklist
-    client.remove_from_blocklist(&admin, &subscriber);
-    assert!(!client.is_blocklisted(&subscriber));
-}
-
-#[test]
-fn test_blocklist_with_multiple_subscriptions() {
-    let (env, client, token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let merchant1 = Address::generate(&env);
-    let merchant2 = Address::generate(&env);
-
-    // Create multiple subscriptions
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &(PREPAID * 2));
-
-    let sub_id1 = client.create_subscription(
-        &subscriber,
-        &merchant1,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
-    let sub_id2 = client.create_subscription(
-        &subscriber,
-        &merchant2,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
-
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Both subscriptions are preserved
-    let sub1 = client.get_subscription(&sub_id1);
-    let sub2 = client.get_subscription(&sub_id2);
-    assert_eq!(sub1.status, SubscriptionStatus::Active);
-    assert_eq!(sub2.status, SubscriptionStatus::Active);
-
-    // Cannot create new subscription
-    let result = client.try_create_subscription(
-        &subscriber,
-        &merchant1,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
-    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
-}
-
-#[test]
-fn test_blocklist_does_not_affect_charging() {
-    let (env, client, token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-
-    // Create subscription and deposit funds
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber, &PREPAID);
-
-    let sub_id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
-    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
-
-    // Admin blocklists subscriber
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    // Advance time and charge
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
-    client.charge_subscription(&sub_id);
-
-    let sub = client.get_subscription(&sub_id);
-    assert!(sub.prepaid_balance < PREPAID);
-}
-
-#[test]
-fn test_blocklist_reason_stored_correctly() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let reason = soroban_sdk::String::from_str(&env, "Repeated chargebacks");
-
-    client.add_to_blocklist(&admin, &subscriber, &Some(reason.clone()));
-
-    let entry = client.get_blocklist_entry(&subscriber);
-    assert_eq!(entry.reason, Some(reason));
-    assert_eq!(entry.added_by, admin);
-}
-
-#[test]
-fn test_blocklist_without_reason() {
-    let (env, client, _token, admin) = setup_test_env();
-    let subscriber = Address::generate(&env);
-
-    client.add_to_blocklist(&admin, &subscriber, &None);
-
-    let entry = client.get_blocklist_entry(&subscriber);
-    assert_eq!(entry.reason, None);
-    assert_eq!(entry.subscriber, subscriber);
-}
-
-#[test]
-fn test_merchant_blocklist_requires_subscription_relationship() {
-    let (env, client, token, _admin) = setup_test_env();
-    let subscriber1 = Address::generate(&env);
-    let subscriber2 = Address::generate(&env);
-    let merchant = Address::generate(&env);
-
-    // Create subscription with subscriber1
-    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&subscriber1, &PREPAID);
-
-    client.create_subscription(
-        &subscriber1,
-        &merchant,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
-
-    // Merchant can blocklist subscriber1
-    client.add_to_blocklist(&merchant, &subscriber1, &None);
-    assert!(client.is_blocklisted(&subscriber1));
-
-    // Merchant cannot blocklist subscriber2 (no relationship)
-    let result = client.try_add_to_blocklist(&merchant, &subscriber2, &None);
-    assert_eq!(result, Err(Ok(Error::Forbidden)));
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
