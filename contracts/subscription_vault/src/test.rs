@@ -836,10 +836,7 @@ fn test_deposit_funds_event_payload() {
     let deposit_event = events.last().expect("No events found");
 
     // Verify event topics: (Symbol("deposited"), subscription_id)
-    assert_eq!(
-        deposit_event.0,
-        client.address
-    );
+    assert_eq!(deposit_event.0, client.address);
     assert_eq!(
         Symbol::from_val(&env, &deposit_event.1.get(0).expect("Missing topic 0")),
         Symbol::new(&env, "deposited")
