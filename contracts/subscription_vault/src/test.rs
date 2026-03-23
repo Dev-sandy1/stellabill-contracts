@@ -3,7 +3,7 @@ use crate::{
     Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault,
     SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
@@ -99,6 +99,110 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
             .instance()
             .set(&soroban_sdk::Symbol::new(env, "next_id"), &value);
     });
+}
+
+const ALL_STATUSES: [SubscriptionStatus; 5] = [
+    SubscriptionStatus::Active,
+    SubscriptionStatus::Paused,
+    SubscriptionStatus::Cancelled,
+    SubscriptionStatus::InsufficientBalance,
+    SubscriptionStatus::GracePeriod,
+];
+
+#[derive(Clone, Copy, Debug)]
+enum LifecycleAction {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TransitionAction {
+    Pause,
+    Resume,
+    Cancel,
+    EnterGrace,
+    EnterInsufficientBalance,
+}
+
+fn manual_can_transition(from: &SubscriptionStatus, to: &SubscriptionStatus) -> bool {
+    if from == to {
+        return true;
+    }
+
+    match from {
+        SubscriptionStatus::Active => matches!(
+            to,
+            SubscriptionStatus::Paused
+                | SubscriptionStatus::Cancelled
+                | SubscriptionStatus::InsufficientBalance
+                | SubscriptionStatus::GracePeriod
+        ),
+        SubscriptionStatus::Paused => {
+            matches!(
+                to,
+                SubscriptionStatus::Active | SubscriptionStatus::Cancelled
+            )
+        }
+        SubscriptionStatus::Cancelled => false,
+        SubscriptionStatus::InsufficientBalance => {
+            matches!(
+                to,
+                SubscriptionStatus::Active | SubscriptionStatus::Cancelled
+            )
+        }
+        SubscriptionStatus::GracePeriod => {
+            matches!(
+                to,
+                SubscriptionStatus::Active
+                    | SubscriptionStatus::Cancelled
+                    | SubscriptionStatus::InsufficientBalance
+            )
+        }
+    }
+}
+
+fn lifecycle_action_target(action: LifecycleAction) -> SubscriptionStatus {
+    match action {
+        LifecycleAction::Pause => SubscriptionStatus::Paused,
+        LifecycleAction::Resume => SubscriptionStatus::Active,
+        LifecycleAction::Cancel => SubscriptionStatus::Cancelled,
+    }
+}
+
+fn transition_action_target(action: TransitionAction) -> SubscriptionStatus {
+    match action {
+        TransitionAction::Pause => SubscriptionStatus::Paused,
+        TransitionAction::Resume => SubscriptionStatus::Active,
+        TransitionAction::Cancel => SubscriptionStatus::Cancelled,
+        TransitionAction::EnterGrace => SubscriptionStatus::GracePeriod,
+        TransitionAction::EnterInsufficientBalance => SubscriptionStatus::InsufficientBalance,
+    }
+}
+
+fn lcg_next(seed: &mut u64) -> u64 {
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *seed
+}
+
+fn random_lifecycle_action(seed: &mut u64) -> LifecycleAction {
+    match lcg_next(seed) % 3 {
+        0 => LifecycleAction::Pause,
+        1 => LifecycleAction::Resume,
+        _ => LifecycleAction::Cancel,
+    }
+}
+
+fn random_transition_action(seed: &mut u64) -> TransitionAction {
+    match lcg_next(seed) % 5 {
+        0 => TransitionAction::Pause,
+        1 => TransitionAction::Resume,
+        2 => TransitionAction::Cancel,
+        3 => TransitionAction::EnterGrace,
+        _ => TransitionAction::EnterInsufficientBalance,
+    }
 }
 
 #[contract]
@@ -273,6 +377,136 @@ fn test_get_allowed_transitions() {
 
     let ib_targets = get_allowed_transitions(&SubscriptionStatus::InsufficientBalance);
     assert_eq!(ib_targets.len(), 2);
+}
+
+#[test]
+fn test_state_machine_property_transition_matrix_matches_manual_rules() {
+    for from in ALL_STATUSES.iter() {
+        let allowed = get_allowed_transitions(from);
+
+        for to in ALL_STATUSES.iter() {
+            let expected = manual_can_transition(from, to);
+            assert_eq!(can_transition(from, to), expected);
+            assert_eq!(validate_status_transition(from, to).is_ok(), expected);
+
+            if from == to {
+                assert!(!allowed.contains(to));
+            } else {
+                assert_eq!(allowed.contains(to), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_random_transition_sequences_only_allow_legal_targets() {
+    for start in ALL_STATUSES.iter() {
+        for seed_base in 0..64u64 {
+            let mut seed = seed_base + (start.clone() as u64) * 97;
+            let mut current = start.clone();
+
+            for _ in 0..24 {
+                let action = random_transition_action(&mut seed);
+                let target = transition_action_target(action);
+                let expected = manual_can_transition(&current, &target);
+
+                assert_eq!(can_transition(&current, &target), expected);
+                assert_eq!(
+                    validate_status_transition(&current, &target).is_ok(),
+                    expected
+                );
+
+                if expected {
+                    current = target;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_lifecycle_entrypoints_follow_manual_model() {
+    for start in ALL_STATUSES.iter() {
+        for seed_base in 0..48u64 {
+            let (env, client, _, _) = setup_test_env();
+            let (id, subscriber, _) = create_test_subscription(&env, &client, start.clone());
+            let mut expected = start.clone();
+            let mut seed = seed_base + (start.clone() as u64) * 131;
+
+            for _ in 0..12 {
+                let action = random_lifecycle_action(&mut seed);
+                let target = lifecycle_action_target(action);
+                let should_succeed = manual_can_transition(&expected, &target);
+
+                let result = match action {
+                    LifecycleAction::Pause => client.try_pause_subscription(&id, &subscriber),
+                    LifecycleAction::Resume => client.try_resume_subscription(&id, &subscriber),
+                    LifecycleAction::Cancel => client.try_cancel_subscription(&id, &subscriber),
+                };
+
+                assert_eq!(result.is_ok(), should_succeed);
+
+                let current = client.get_subscription(&id).status;
+                if should_succeed {
+                    expected = target;
+                    assert_eq!(current, expected);
+                } else {
+                    assert_eq!(current, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_charge_failures_and_recovery_paths_obey_rules() {
+    for seed_base in 0..32u64 {
+        let mut seed = seed_base;
+
+        for step in 0..10 {
+            let (env, client, token, _) = setup_test_env();
+            let (id, subscriber, _) =
+                create_test_subscription(&env, &client, SubscriptionStatus::Active);
+            let in_grace_window = lcg_next(&mut seed) % 2 == 0;
+            let topup_amount = if lcg_next(&mut seed) % 2 == 0 {
+                AMOUNT - 1
+            } else {
+                PREPAID
+            };
+
+            seed_balance(&env, &client, id, 0);
+            let charge_time = if in_grace_window {
+                T0 + INTERVAL + 1
+            } else {
+                T0 + INTERVAL + (7 * 24 * 60 * 60) + 1
+            };
+            env.ledger().set_timestamp(charge_time + step as u64);
+
+            let result = client.try_charge_subscription(&id);
+            assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+
+            let failed_status = client.get_subscription(&id).status;
+            assert_eq!(failed_status, SubscriptionStatus::Active);
+
+            soroban_sdk::token::StellarAssetClient::new(&env, &token)
+                .mint(&subscriber, &topup_amount.max(1_000_000));
+            client.deposit_funds(&id, &subscriber, &topup_amount.max(1_000_000));
+
+            let after_deposit = client.get_subscription(&id).status;
+            assert_eq!(after_deposit, SubscriptionStatus::Active);
+
+            if topup_amount >= AMOUNT {
+                env.ledger()
+                    .set_timestamp(charge_time + INTERVAL + step as u64 + 1);
+                let charge_again = client.try_charge_subscription(&id);
+                assert!(charge_again.is_ok());
+                assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+            } else {
+                client.cancel_subscription(&id, &subscriber);
+                assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+            }
+        }
+    }
 }
 
 // -- Contract Lifecycle Tests -------------------------------------------------
