@@ -15,10 +15,6 @@
 //! 2. **Effects**: Update internal contract state (prepaid_balance) in storage
 //! 3. **Interactions**: Call token.transfer() AFTER state is persisted
 //!
-//! This ordering ensures that even if the token contract calls back into our contract,
-//! the contract state will already be consistent and the attacker cannot exploit the
-//! temporal inconsistency.
-//!
 //! See `docs/reentrancy.md` for full details on reentrancy threats and mitigations.
 
 use crate::queries::get_subscription;
@@ -218,6 +214,7 @@ pub fn do_create_subscription(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn do_create_subscription_with_token(
     env: &Env,
     subscriber: Address,
@@ -230,6 +227,10 @@ pub fn do_create_subscription_with_token(
 ) -> Result<u32, Error> {
     subscriber.require_auth();
     validate_non_negative(amount)?;
+
+    if interval_seconds == 0 {
+        return Err(Error::InvalidInput);
+    }
     if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
     }
@@ -268,7 +269,7 @@ pub fn do_create_subscription_with_token(
 
     env.storage().instance().set(&id, &sub);
 
-    // Maintain merchant → subscription-ID index
+    // Maintain merchant -> subscription-ID index
     let merchant_key = DataKey::MerchantSubs(sub.merchant.clone());
     let mut ids: Vec<u32> = env
         .storage()
@@ -310,9 +311,12 @@ pub fn do_deposit_funds(
 ) -> Result<(), Error> {
     subscriber.require_auth();
 
-    // ──────────────────────────────────────────────────────────────────────────
+    // Blocklist check: prevent blocklisted subscribers from depositing funds
+    if crate::blocklist::is_blocklisted(env, &subscriber) {
+        return Err(Error::SubscriberBlocklisted);
+    }
+
     // CHECKS: Validate all preconditions before any state mutations
-    // ──────────────────────────────────────────────────────────────────────────
     let min_topup: i128 = crate::admin::get_min_topup(env)?;
     if amount < min_topup {
         return Err(Error::BelowMinimumTopup);
@@ -325,19 +329,14 @@ pub fn do_deposit_funds(
     // Enforce credit limit for additional prepaid balance being loaded.
     enforce_credit_limit_for_delta(env, &subscriber, &token_addr, amount)?;
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // EFFECTS: Update internal state before external interactions (CEI pattern)
-    // ──────────────────────────────────────────────────────────────────────────
+    // EFFECTS
     sub.prepaid_balance = safe_add_balance(sub.prepaid_balance, amount)?;
     env.storage().instance().set(&subscription_id, &sub);
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // INTERACTIONS: Only after internal state is consistent, call token contract
-    // ──────────────────────────────────────────────────────────────────────────
+    // INTERACTIONS
     let token_client = soroban_sdk::token::Client::new(env, &token_addr);
     token_client.transfer(&subscriber, &env.current_contract_address(), &amount);
 
-    // Emit event after successful transfer
     env.events().publish(
         (Symbol::new(env, "deposited"), subscription_id),
         (subscriber, amount, sub.prepaid_balance),
@@ -396,9 +395,6 @@ pub fn do_resume_subscription(
 }
 
 /// Merchant-initiated one-off charge: debits `amount` from the subscription's prepaid balance.
-///
-/// Requires merchant auth; the subscription's merchant must match the caller.
-/// Subscription must be Active or Paused. Amount must be positive and not exceed prepaid_balance.
 ///
 /// One-off charges also count toward the lifetime cap when one is configured.
 pub fn do_charge_one_off(
@@ -650,7 +646,7 @@ pub fn do_create_subscription_from_plan(
         .instance()
         .set(&sub_plan_storage_key, &plan_template_id);
 
-    // Maintain merchant → subscription-ID index
+    // Maintain merchant -> subscription-ID index
     let merchant_key = DataKey::MerchantSubs(plan.merchant.clone());
     let mut ids: Vec<u32> = env
         .storage()

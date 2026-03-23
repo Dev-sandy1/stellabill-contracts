@@ -7,11 +7,15 @@
 //! see `docs/subscription_lifecycle.md`.
 //!
 //! For lifetime charge cap semantics see `docs/lifetime_caps.md`.
+//!
+//! For metadata key-value store see `docs/subscription_metadata.md`.
 
 // ── Modules ──────────────────────────────────────────────────────────────────
 mod admin;
+mod blocklist;
 mod charge_core;
 mod merchant;
+mod metadata;
 mod oracle;
 mod queries;
 mod reentrancy;
@@ -21,9 +25,10 @@ mod statements;
 mod subscription;
 mod types;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
+pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
@@ -31,11 +36,13 @@ pub use types::{
     BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
     BillingStatementAggregate, BillingStatementsPage, CapInfo, ContractSnapshot, DataKey,
     EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MigrationExportEvent, NextChargeInfo,
-    OneOffChargedEvent, OracleConfig, OraclePrice, PlanTemplate, PlanTemplateUpdatedEvent,
-    RecoveryEvent, RecoveryReason, Subscription, SubscriptionCancelledEvent,
-    SubscriptionChargedEvent, SubscriptionCreatedEvent, SubscriptionMigratedEvent,
-    SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
+    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent, MetadataSetEvent,
+    MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
+    PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
+    Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
+    SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
+    SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
+    MAX_METADATA_VALUE_LENGTH,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -61,7 +68,7 @@ fn require_admin_auth(env: &Env, admin: &Address) -> Result<(), Error> {
 fn get_emergency_stop(env: &Env) -> bool {
     env.storage()
         .instance()
-        .get(&DataKey::EmergencyStop)
+        .get(&Symbol::new(env, "emergency_stop"))
         .unwrap_or(false)
 }
 
@@ -151,7 +158,9 @@ impl SubscriptionVault {
         if get_emergency_stop(&env) {
             return Ok(());
         }
-        env.storage().instance().set(&DataKey::EmergencyStop, &true);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_stop"), &true);
         env.events().publish(
             (Symbol::new(&env, "emergency_stop_enabled"),),
             EmergencyStopEnabledEvent {
@@ -159,7 +168,6 @@ impl SubscriptionVault {
                 timestamp: env.ledger().timestamp(),
             },
         );
-
         Ok(())
     }
 
@@ -169,15 +177,12 @@ impl SubscriptionVault {
     /// after the incident has been resolved and the contract is safe to operate.
     pub fn disable_emergency_stop(env: Env, admin: Address) -> Result<(), Error> {
         require_admin_auth(&env, &admin)?;
-
         if !get_emergency_stop(&env) {
             return Ok(());
         }
-
         env.storage()
             .instance()
-            .set(&DataKey::EmergencyStop, &false);
-
+            .set(&Symbol::new(&env, "emergency_stop"), &false);
         env.events().publish(
             (Symbol::new(&env, "emergency_stop_disabled"),),
             EmergencyStopDisabledEvent {
@@ -185,7 +190,6 @@ impl SubscriptionVault {
                 timestamp: env.ledger().timestamp(),
             },
         );
-
         Ok(())
     }
 
@@ -347,7 +351,6 @@ impl SubscriptionVault {
         lifetime_cap: Option<i128>,
     ) -> Result<u32, Error> {
         require_not_emergency_stop(&env)?;
-
         subscription::do_create_subscription(
             &env,
             subscriber,
@@ -360,6 +363,7 @@ impl SubscriptionVault {
     }
 
     /// Create a subscription pinned to a specific accepted token.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_subscription_with_token(
         env: Env,
         subscriber: Address,
@@ -873,6 +877,71 @@ impl SubscriptionVault {
     /// Read the currently configured oracle integration settings.
     pub fn get_oracle_config(env: Env) -> OracleConfig {
         oracle::get_oracle_config(&env)
+    }
+
+    // ── Metadata ──────────────────────────────────────────────────────────────
+
+    /// Set or update a metadata key-value pair on a subscription.
+    ///
+    /// Authorization: subscriber or merchant.
+    /// Does not affect financial state (balances, status, charges).
+    pub fn set_metadata(
+        env: Env,
+        subscription_id: u32,
+        authorizer: Address,
+        key: String,
+        value: String,
+    ) -> Result<(), Error> {
+        metadata::do_set_metadata(&env, subscription_id, &authorizer, key, value)
+    }
+
+    /// Delete a metadata key from a subscription.
+    ///
+    /// Authorization: subscriber or merchant.
+    pub fn delete_metadata(
+        env: Env,
+        subscription_id: u32,
+        authorizer: Address,
+        key: String,
+    ) -> Result<(), Error> {
+        metadata::do_delete_metadata(&env, subscription_id, &authorizer, key)
+    }
+
+    /// Get a metadata value by key.
+    pub fn get_metadata(env: Env, subscription_id: u32, key: String) -> Result<String, Error> {
+        metadata::do_get_metadata(&env, subscription_id, key)
+    }
+
+    /// List all metadata keys for a subscription.
+    pub fn list_metadata_keys(env: Env, subscription_id: u32) -> Result<Vec<String>, Error> {
+        metadata::do_list_metadata_keys(&env, subscription_id)
+    }
+
+    // ── Blocklist ──────────────────────────────────────────────────────────────
+
+    pub fn add_to_blocklist(
+        env: Env,
+        authorizer: Address,
+        subscriber: Address,
+        reason: Option<String>,
+    ) -> Result<(), Error> {
+        blocklist::do_add_to_blocklist(&env, authorizer, subscriber, reason)
+    }
+
+    pub fn remove_from_blocklist(
+        env: Env,
+        admin: Address,
+        subscriber: Address,
+    ) -> Result<(), Error> {
+        blocklist::do_remove_from_blocklist(&env, admin, subscriber)
+    }
+
+    pub fn get_blocklist_entry(env: Env, subscriber: Address) -> Result<BlocklistEntry, Error> {
+        blocklist::get_blocklist_entry(&env, subscriber)
+    }
+
+    pub fn is_blocklisted(env: Env, subscriber: Address) -> bool {
+        blocklist::is_blocklisted(&env, &subscriber)
     }
 }
 

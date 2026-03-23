@@ -3,7 +3,14 @@
 //! Kept in a separate module to reduce merge conflicts when editing state machine
 //! or contract entrypoints.
 
-use soroban_sdk::{contracterror, contracttype, Address, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
+
+/// Maximum number of metadata keys per subscription.
+pub const MAX_METADATA_KEYS: u32 = 10;
+/// Maximum length of a metadata key in bytes.
+pub const MAX_METADATA_KEY_LENGTH: u32 = 32;
+/// Maximum length of a metadata value in bytes.
+pub const MAX_METADATA_VALUE_LENGTH: u32 = 256;
 
 /// Storage keys for secondary indices.
 #[contracttype]
@@ -32,158 +39,6 @@ pub enum DataKey {
     BillingStatement(u32, u32),
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
-}
-
-/// Detailed error information for insufficient balance scenarios.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InsufficientBalanceError {
-    /// The current available prepaid balance in the subscription vault.
-    pub available: i128,
-    /// The required amount to complete the charge.
-    pub required: i128,
-}
-
-impl InsufficientBalanceError {
-    pub const fn new(available: i128, required: i128) -> Self {
-        Self {
-            available,
-            required,
-        }
-    }
-
-    pub fn shortfall(&self) -> i128 {
-        self.required - self.available
-    }
-}
-
-#[contracterror]
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum Error {
-    // --- Auth Errors (401-403) ---
-    /// Caller does not have the required authorization.
-    Unauthorized = 401,
-    /// Caller is authorized but does not have permission for this specific action.
-    Forbidden = 403,
-
-    // --- Not Found (404) ---
-    /// The requested resource was not found in storage.
-    NotFound = 404,
-
-    // --- Invalid Input (400, 402, 405-409) ---
-    /// The requested state transition is not allowed by the state machine.
-    InvalidStatusTransition = 400,
-    /// The top-up amount is below the minimum required threshold.
-    BelowMinimumTopup = 402,
-
-    // --- Business Logic Errors (1001-1005, 1010, 1012-1016) ---
-    /// Charge interval has not elapsed since the last payment.
-    IntervalNotElapsed = 1001,
-    /// Subscription is not in an active state for this operation.
-    NotActive = 1002,
-    /// Insufficient balance in the subscription vault.
-    InsufficientBalance = 1003,
-    /// Usage charging is not enabled for this subscription.
-    UsageNotEnabled = 1004,
-    /// Insufficient prepaid balance for the requested usage charge.
-    InsufficientPrepaidBalance = 1005,
-    /// The provided amount is zero or negative.
-    InvalidAmount = 1006,
-    /// Charge already processed for this billing period (replay protection).
-    Replay = 1007,
-    /// Invalid recovery amount provided.
-    InvalidRecoveryAmount = 1008,
-    /// Emergency stop is active - critical operations are blocked.
-    EmergencyStopActive = 1009,
-    /// Operation would result in a negative balance or underflow.
-    Underflow = 1010,
-    /// Recovery operation not allowed for this reason or context.
-    RecoveryNotAllowed = 1011,
-    /// Combined balance would overflow i128.
-    Overflow = 1012,
-    /// The contract or requested configuration is not initialized.
-    NotInitialized = 1013,
-    /// The requested export limit exceeds the maximum allowed.
-    InvalidExportLimit = 1014,
-    /// Invalid input provided to a function.
-    InvalidInput = 1015,
-    /// Reentrancy detected - function called recursively during execution.
-    Reentrancy = 1016,
-    /// Lifetime charge cap has been reached; no further charges are allowed.
-    LifetimeCapReached = 1017,
-    /// Contract is already initialized; init may only be called once.
-    AlreadyInitialized = 1018,
-    /// Oracle pricing is enabled but no oracle is configured.
-    OracleNotConfigured = 1019,
-    /// Oracle returned an invalid or missing price payload.
-    OraclePriceUnavailable = 1020,
-    /// Oracle price is stale relative to configured max age.
-    OraclePriceStale = 1021,
-    /// Oracle returned a non-positive price.
-    OraclePriceInvalid = 1022,
-    /// The contract has allocated the maximum number of subscriptions.
-    SubscriptionLimitReached = 429,
-    /// Subscriber has reached the maximum allowed number of active
-    /// subscriptions for this plan.
-    MaxConcurrentSubscriptionsReached = 1023,
-    /// Subscriber's configured credit limit would be exceeded.
-    CreditLimitExceeded = 1024,
-}
-
-impl Error {
-    /// Returns the numeric code for this error (for batch result reporting).
-    pub const fn to_code(self) -> u32 {
-        match self {
-            Error::NotFound => 404,
-            Error::Unauthorized => 401,
-            Error::Forbidden => 403,
-            Error::IntervalNotElapsed => 1001,
-            Error::NotActive => 1002,
-            Error::InvalidStatusTransition => 400,
-            Error::BelowMinimumTopup => 402,
-            Error::Overflow => 1012,
-            Error::Underflow => 1010,
-            Error::InsufficientBalance => 1003,
-            Error::InvalidAmount => 1006,
-            Error::UsageNotEnabled => 1004,
-            Error::InsufficientPrepaidBalance => 1005,
-            Error::Replay => 1007,
-            Error::InvalidRecoveryAmount => 1008,
-            Error::EmergencyStopActive => 1009,
-            Error::RecoveryNotAllowed => 1011,
-            Error::InvalidInput => 1015,
-            Error::NotInitialized => 1013,
-            Error::InvalidExportLimit => 1014,
-            Error::Reentrancy => 1016,
-            Error::LifetimeCapReached => 1017,
-            Error::AlreadyInitialized => 1018,
-            Error::OracleNotConfigured => 1019,
-            Error::OraclePriceUnavailable => 1020,
-            Error::OraclePriceStale => 1021,
-            Error::OraclePriceInvalid => 1022,
-            Error::SubscriptionLimitReached => 429,
-            Error::MaxConcurrentSubscriptionsReached => 1023,
-            Error::CreditLimitExceeded => 1024,
-        }
-    }
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchChargeResult {
-    /// True if the charge succeeded.
-    pub success: bool,
-    /// If success is false, the error code; otherwise 0.
-    pub error_code: u32,
-}
-
-/// Result of a batch merchant withdrawal operation.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BatchWithdrawResult {
-    pub success: bool,
-    pub error_code: u32,
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -256,6 +111,181 @@ pub struct Subscription {
     /// When `lifetime_cap` is `Some(cap)` and `lifetime_charged >= cap`, no
     /// further charges are processed and the subscription transitions to `Cancelled`.
     pub lifetime_charged: i128,
+}
+
+/// Detailed error information for insufficient balance scenarios.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsufficientBalanceError {
+    /// The current available prepaid balance in the subscription vault.
+    pub available: i128,
+    /// The required amount to complete the charge.
+    pub required: i128,
+}
+
+impl InsufficientBalanceError {
+    pub const fn new(available: i128, required: i128) -> Self {
+        Self {
+            available,
+            required,
+        }
+    }
+
+    pub fn shortfall(&self) -> i128 {
+        self.required - self.available
+    }
+}
+
+#[contracterror]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Error {
+    // --- Auth Errors (401-403) ---
+    /// Caller does not have the required authorization.
+    Unauthorized = 401,
+    /// Caller is authorized but does not have permission for this specific action.
+    Forbidden = 403,
+
+    // --- Not Found (404) ---
+    /// The requested resource was not found in storage.
+    NotFound = 404,
+
+    // --- Invalid Input (400, 402) ---
+    /// The requested state transition is not allowed by the state machine.
+    InvalidStatusTransition = 400,
+    /// The top-up amount is below the minimum required threshold.
+    BelowMinimumTopup = 402,
+
+    // --- Subscription limit (429) ---
+    /// The contract has allocated the maximum number of subscriptions.
+    SubscriptionLimitReached = 429,
+
+    // --- Business Logic Errors (1001-1018) ---
+    /// Charge interval has not elapsed since the last payment.
+    IntervalNotElapsed = 1001,
+    /// Subscription is not in an active state for this operation.
+    NotActive = 1002,
+    /// Insufficient balance in the subscription vault.
+    InsufficientBalance = 1003,
+    /// Usage charging is not enabled for this subscription.
+    UsageNotEnabled = 1004,
+    /// Insufficient prepaid balance for the requested usage charge.
+    InsufficientPrepaidBalance = 1005,
+    /// The provided amount is zero or negative.
+    InvalidAmount = 1006,
+    /// Charge already processed for this billing period (replay protection).
+    Replay = 1007,
+    /// Invalid recovery amount provided.
+    InvalidRecoveryAmount = 1008,
+    /// Emergency stop is active - critical operations are blocked.
+    EmergencyStopActive = 1009,
+    /// Operation would result in a negative balance or underflow.
+    Underflow = 1010,
+    /// Recovery operation not allowed for this reason or context.
+    RecoveryNotAllowed = 1011,
+    /// Combined balance would overflow i128.
+    Overflow = 1012,
+    /// The contract or requested configuration is not initialized.
+    NotInitialized = 1013,
+    /// The requested export limit exceeds the maximum allowed.
+    InvalidExportLimit = 1014,
+    /// Invalid input provided to a function.
+    InvalidInput = 1015,
+    /// Reentrancy detected - function called recursively during execution.
+    Reentrancy = 1016,
+    /// Lifetime charge cap has been reached; no further charges are allowed.
+    LifetimeCapReached = 1017,
+    /// Contract is already initialized; init may only be called once.
+    AlreadyInitialized = 1018,
+
+    // --- Metadata Errors (1023-1025) ---
+    /// Metadata key limit reached for this subscription.
+    MetadataKeyLimitReached = 1023,
+    /// Metadata key exceeds maximum allowed length.
+    MetadataKeyTooLong = 1024,
+    /// Metadata value exceeds maximum allowed length.
+    MetadataValueTooLong = 1025,
+
+    // --- Blocklist (1026) ---
+    /// Subscriber is on the blocklist and cannot create or interact with subscriptions.
+    SubscriberBlocklisted = 1026,
+
+    // --- Oracle Errors (1027-1030) ---
+    /// Oracle pricing is enabled but no oracle is configured.
+    OracleNotConfigured = 1027,
+    /// Oracle returned an invalid or missing price payload.
+    OraclePriceUnavailable = 1028,
+    /// Oracle price is stale relative to configured max age.
+    OraclePriceStale = 1029,
+    /// Oracle returned a non-positive price.
+    OraclePriceInvalid = 1030,
+
+    // --- Subscription Plan / Credit (1031-1032) ---
+    /// Subscriber has reached the maximum allowed number of active
+    /// subscriptions for this plan.
+    MaxConcurrentSubscriptionsReached = 1031,
+    /// Subscriber's configured credit limit would be exceeded.
+    CreditLimitExceeded = 1032,
+}
+
+impl Error {
+    /// Returns the numeric code for this error (for batch result reporting).
+    pub const fn to_code(self) -> u32 {
+        match self {
+            Error::NotFound => 404,
+            Error::Unauthorized => 401,
+            Error::Forbidden => 403,
+            Error::IntervalNotElapsed => 1001,
+            Error::NotActive => 1002,
+            Error::InvalidStatusTransition => 400,
+            Error::BelowMinimumTopup => 402,
+            Error::Overflow => 1012,
+            Error::Underflow => 1010,
+            Error::InsufficientBalance => 1003,
+            Error::InvalidAmount => 1006,
+            Error::UsageNotEnabled => 1004,
+            Error::InsufficientPrepaidBalance => 1005,
+            Error::Replay => 1007,
+            Error::InvalidRecoveryAmount => 1008,
+            Error::EmergencyStopActive => 1009,
+            Error::RecoveryNotAllowed => 1011,
+            Error::InvalidInput => 1015,
+            Error::NotInitialized => 1013,
+            Error::InvalidExportLimit => 1014,
+            Error::Reentrancy => 1016,
+            Error::LifetimeCapReached => 1017,
+            Error::AlreadyInitialized => 1018,
+            Error::MetadataKeyLimitReached => 1023,
+            Error::MetadataKeyTooLong => 1024,
+            Error::MetadataValueTooLong => 1025,
+            Error::SubscriberBlocklisted => 1026,
+            Error::OracleNotConfigured => 1027,
+            Error::OraclePriceUnavailable => 1028,
+            Error::OraclePriceStale => 1029,
+            Error::OraclePriceInvalid => 1030,
+            Error::SubscriptionLimitReached => 429,
+            Error::MaxConcurrentSubscriptionsReached => 1031,
+            Error::CreditLimitExceeded => 1032,
+        }
+    }
+}
+
+/// Result of charging one subscription in a batch.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchChargeResult {
+    /// True if the charge succeeded.
+    pub success: bool,
+    /// If success is false, the error code; otherwise 0.
+    pub error_code: u32,
+}
+
+/// Result of a batch merchant withdrawal operation.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchWithdrawResult {
+    pub success: bool,
+    pub error_code: u32,
 }
 
 /// A read-only snapshot of the contract's configuration and current state.
@@ -591,6 +621,24 @@ pub struct LifetimeCapReachedEvent {
     pub lifetime_charged: i128,
     /// Timestamp when the cap was reached.
     pub timestamp: u64,
+}
+
+/// Event emitted when metadata is set or updated on a subscription.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MetadataSetEvent {
+    pub subscription_id: u32,
+    pub key: String,
+    pub authorizer: Address,
+}
+
+/// Event emitted when metadata is deleted from a subscription.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MetadataDeletedEvent {
+    pub subscription_id: u32,
+    pub key: String,
+    pub authorizer: Address,
 }
 
 /// Event emitted when a plan template is updated to a new version.
