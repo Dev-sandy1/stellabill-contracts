@@ -2405,13 +2405,8 @@ fn test_plan_update_rejects_usage_flag_change() {
     let (client, _token, _admin) = setup_contract(&env);
     let merchant = Address::generate(&env);
 
-    let plan_id = client.create_plan_template(
-        &merchant,
-        &5_000_000i128,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
+    let plan_id =
+        client.create_plan_template(&merchant, &5_000_000i128, &INTERVAL, &false, &None::<i128>);
 
     // Attempting to update the plan but changing usage_enabled from false to true
     let result = client.try_update_plan_template(
@@ -2439,13 +2434,8 @@ fn test_migration_rejects_usage_flag_change() {
     let merchant = Address::generate(&env);
 
     // Create a plan with usage_enabled = false
-    let plan_id = client.create_plan_template(
-        &merchant,
-        &5_000_000i128,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
+    let plan_id =
+        client.create_plan_template(&merchant, &5_000_000i128, &INTERVAL, &false, &None::<i128>);
 
     let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
 
@@ -2456,12 +2446,12 @@ fn test_migration_rejects_usage_flag_change() {
         token: token.address.clone(),
         amount: 5_000_000i128,
         interval_seconds: INTERVAL,
-        usage_enabled: true,  // Mismatch
+        usage_enabled: true, // Mismatch
         lifetime_cap: None,
         template_key: plan_id, // Same template key
-        version: 2,           // Newer version
+        version: 2,            // Newer version
     };
-    
+
     env.as_contract(&client.address, || {
         let key = (Symbol::new(&env, "plan"), new_plan_id);
         env.storage().instance().set(&key, &malicious_plan);
