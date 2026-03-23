@@ -695,6 +695,12 @@ pub fn do_update_plan_template(
     // Do not allow changing token through versioning – that would be a different plan family.
     let token = existing.token.clone();
 
+    // Enforce usage flag consistency: usage_enabled cannot be changed through versioning
+    // to prevent accidental billing model shifts for downstream subscribers.
+    if usage_enabled != existing.usage_enabled {
+        return Err(Error::InvalidInput);
+    }
+
     let new_plan_id = next_plan_id(env);
     let new_version = existing.version + 1;
     let updated = PlanTemplate {
@@ -767,6 +773,11 @@ pub fn do_migrate_subscription_to_plan(
 
     // For safety, do not allow token switches via migration.
     if new_plan.token != sub.token {
+        return Err(Error::InvalidInput);
+    }
+
+    // For safety, do not allow billing model switches via migration.
+    if new_plan.usage_enabled != sub.usage_enabled {
         return Err(Error::InvalidInput);
     }
 

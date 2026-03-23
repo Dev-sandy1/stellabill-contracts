@@ -2397,3 +2397,79 @@ fn test_create_subscription_with_unaccepted_token_fails() {
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
+
+#[test]
+fn test_plan_update_rejects_usage_flag_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token, _admin) = setup_contract(&env);
+    let merchant = Address::generate(&env);
+
+    let plan_id = client.create_plan_template(
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Attempting to update the plan but changing usage_enabled from false to true
+    let result = client.try_update_plan_template(
+        &merchant,
+        &plan_id,
+        &5_000_000i128,
+        &INTERVAL,
+        &true,
+        &None::<i128>,
+    );
+
+    // Should fail with InvalidInput because usage_enabled cannot be changed
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_migration_rejects_usage_flag_change() {
+    use crate::types::PlanTemplate;
+    use soroban_sdk::Symbol;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // Create a plan with usage_enabled = false
+    let plan_id = client.create_plan_template(
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Forcefully inject a new plan version directly into storage with usage_enabled = true
+    let new_plan_id = 999u32;
+    let malicious_plan = PlanTemplate {
+        merchant: merchant.clone(),
+        token: token.address.clone(),
+        amount: 5_000_000i128,
+        interval_seconds: INTERVAL,
+        usage_enabled: true,  // Mismatch
+        lifetime_cap: None,
+        template_key: plan_id, // Same template key
+        version: 2,           // Newer version
+    };
+    
+    env.as_contract(&client.address, || {
+        let key = (Symbol::new(&env, "plan"), new_plan_id);
+        env.storage().instance().set(&key, &malicious_plan);
+    });
+
+    // Attempt to migrate to this new plan
+    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &new_plan_id);
+
+    // Should fail with InvalidInput due to billing model mismatch
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
