@@ -515,6 +515,15 @@ pub struct EmergencyStopEnabledEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when admin is rotated to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminRotatedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
+    pub timestamp: u64,
+}
+
 /// Event emitted when emergency stop is disabled.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -607,6 +616,15 @@ pub struct SubscriptionResumedEvent {
 #[derive(Clone, Debug)]
 pub struct MerchantWithdrawalEvent {
     pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event emitted when a subscriber withdraws funds after cancellation.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriberWithdrawalEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
     pub amount: i128,
 }
 
@@ -732,4 +750,14 @@ pub struct PartialRefundEvent {
     pub subscriber: Address,
     /// Amount refunded in token base units.
     pub amount: i128,
+    /// Ledger timestamp when the refund was processed.
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MerchantConfig {
+    pub fee_address: Option<Address>,
+    pub redirect_url: String, // e.g., for off-chain success callbacks
+    pub is_paused: bool,      // Global pause for all merchant plans
 }
