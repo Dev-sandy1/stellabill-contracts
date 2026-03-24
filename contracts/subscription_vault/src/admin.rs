@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use crate::charge_core::charge_one;
-use crate::types::{AcceptedToken, BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
+use crate::types::{AcceptedToken, BatchChargeResult, DataKey, Error, RecoveryEvent, RecoveryReason};
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 fn accepted_tokens_key(env: &Env) -> Symbol {
@@ -40,8 +40,7 @@ pub fn do_init(
     instance.set(&Symbol::new(env, "admin"), &admin);
     instance.set(&Symbol::new(env, "min_topup"), &min_topup);
     instance.set(&Symbol::new(env, "grace_period"), &grace_period);
-    instance.set(&Symbol::new(env, "schema_version"), &1u32);
-
+    instance.set(&DataKey::SchemaVersion, &1u32);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
         (token, admin, min_topup, grace_period),
