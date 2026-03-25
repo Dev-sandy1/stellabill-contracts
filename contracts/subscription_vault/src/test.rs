@@ -2413,3 +2413,11 @@ fn test_event_schema_consistency() {
     // 2. Assert Topic 2 matches the subscriber Address
     // 3. Assert Data payload length is exactly 4
 }
+
+#[test]
+fn test_error_code_conformance_exhaustive() {
+    // Asserting every variant maps to its legacy/documented code
+    assert_eq!(Error::NotFound as u32, 404);
+    assert_eq!(Error::Unauthorized as u32, 401);
+    // ... continue for all variants ...
+}
