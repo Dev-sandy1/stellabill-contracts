@@ -5039,3 +5039,123 @@ mod storage_layout {
         assert_eq!(Error::AlreadyInitialized as u32, 1018);
     }
 }
+
+#[test]
+fn test_merchant_token_bucket_reconciliation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_c = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+    client.add_accepted_token(&admin, &token_c, &6);
+
+    let merchant = Address::generate(&env);
+    let subscriber_a = Address::generate(&env);
+    let subscriber_b = Address::generate(&env);
+
+    let token_a_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_a);
+    let token_b_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_b);
+    let token_a_client = soroban_sdk::token::Client::new(&env, &token_a);
+    let token_b_client = soroban_sdk::token::Client::new(&env, &token_b);
+
+    token_a_admin.mint(&subscriber_a, &100_000_000i128);
+    token_b_admin.mint(&subscriber_b, &100_000_000i128);
+
+    let id_a = client.create_subscription(
+        &subscriber_a,
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    let id_b = client.create_subscription_with_token(
+        &subscriber_b,
+        &merchant,
+        &token_b,
+        &7_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
+    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
+
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    // Charge cycle 1
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    // Partial withdraw Token A (test withdrawal invariant and isolation)
+    client.withdraw_merchant_token_funds(&merchant, &token_a, &2_000_000i128);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        3_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    assert_eq!(token_a_client.balance(&merchant), 2_000_000i128);
+    assert_eq!(token_b_client.balance(&merchant), 0);
+
+    // Charge cycle 2 (interleaved sequence)
+    env.ledger().set_timestamp(T0 + 2 * INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        14_000_000i128
+    );
+
+    // Full withdraw Token B
+    client.withdraw_merchant_token_funds(&merchant, &token_b, &14_000_000i128);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    assert_eq!(token_a_client.balance(&merchant), 2_000_000i128);
+    assert_eq!(token_b_client.balance(&merchant), 14_000_000i128);
+}
