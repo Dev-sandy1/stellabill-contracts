@@ -1,8 +1,8 @@
 //! Single charge logic (no auth). Used by charge_subscription and batch_charge.
 //!
 //! Charge runs only when status is Active or GracePeriod. On insufficient balance the
-//! function returns an error without persisting failure-path state mutations, so
-//! batch and single-charge entrypoints observe the same ledger semantics.
+//! subscription is moved to a recoverable non-active state and an explicit failure
+//! event is emitted without mutating financial accounting state.
 //! On lifetime cap exhaustion the subscription is cancelled (terminal state).
 //!
 //! See `docs/subscription_lifecycle.md` for lifecycle details.
@@ -33,13 +33,19 @@ fn idem_key(subscription_id: u32) -> (Symbol, u32) {
     (KEY_IDEM, subscription_id)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChargeExecutionResult {
+    Charged,
+    InsufficientBalance,
+}
+
 /// Performs a single interval-based charge with optional replay protection.
 pub fn charge_one(
     env: &Env,
     subscription_id: u32,
     now: u64,
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
-) -> Result<(), Error> {
+) -> Result<ChargeExecutionResult, Error> {
     let mut sub = get_subscription(env, subscription_id)?;
     let merchant = sub.merchant.clone();
 
@@ -63,7 +69,7 @@ pub fn charge_one(
             .get::<_, soroban_sdk::BytesN<32>>(&idem_key(subscription_id))
         {
             if stored == *k {
-                return Ok(());
+                return Ok(ChargeExecutionResult::Charged);
             }
         }
     }
@@ -107,7 +113,7 @@ pub fn charge_one(
                 },
             );
 
-            return Ok(());
+            return Ok(ChargeExecutionResult::Charged);
         }
     }
 
@@ -188,7 +194,7 @@ pub fn charge_one(
                 }
             }
 
-            Ok(())
+            Ok(ChargeExecutionResult::Charged)
         }
         Err(_) => {
             let grace_duration = crate::admin::get_grace_period(env).unwrap_or(0);
@@ -196,11 +202,34 @@ pub fn charge_one(
                 .checked_add(grace_duration)
                 .ok_or(Error::Overflow)?;
 
-            if grace_duration > 0 && now < grace_expires {
-                Err(Error::InsufficientBalance)
+            let target_status = if grace_duration > 0 && now < grace_expires {
+                SubscriptionStatus::GracePeriod
             } else {
-                Err(Error::InsufficientBalance)
+                SubscriptionStatus::InsufficientBalance
+            };
+
+            if sub.status != target_status {
+                validate_status_transition(&sub.status, &target_status)?;
+                sub.status = target_status.clone();
             }
+
+            storage.set(&subscription_id, &sub);
+
+            let shortfall = charge_amount.saturating_sub(sub.prepaid_balance).max(0);
+            env.events().publish(
+                (Symbol::new(env, "charge_failed"), subscription_id),
+                SubscriptionChargeFailedEvent {
+                    subscription_id,
+                    merchant: sub.merchant,
+                    required_amount: charge_amount,
+                    available_balance: sub.prepaid_balance,
+                    shortfall,
+                    resulting_status: target_status,
+                    timestamp: now,
+                },
+            );
+
+            Ok(ChargeExecutionResult::InsufficientBalance)
         }
     }
 }

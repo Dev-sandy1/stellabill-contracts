@@ -350,6 +350,23 @@ pub fn do_deposit_funds(
             prepaid_balance: sub.prepaid_balance,
         },
     );
+
+    if (sub.status == SubscriptionStatus::InsufficientBalance
+        || sub.status == SubscriptionStatus::GracePeriod)
+        && sub.prepaid_balance >= sub.amount
+    {
+        env.events().publish(
+            (Symbol::new(env, "recovery_ready"), subscription_id),
+            SubscriptionRecoveryReadyEvent {
+                subscription_id,
+                subscriber: sub.subscriber,
+                prepaid_balance: sub.prepaid_balance,
+                required_amount: sub.amount,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
     Ok(())
 }
 
@@ -431,14 +448,14 @@ pub fn do_pause_subscription(
     Ok(())
 }
 
-/// Resume a paused or insufficient-balance subscription back to `Active`.
+/// Resume a paused, grace-period, or insufficient-balance subscription back to `Active`.
 ///
 /// # Authorization
 /// Only the subscription's `subscriber` or `merchant` may resume.
 /// Any other caller receives [`Error::Forbidden`].
 ///
 /// # Transition guard
-/// `Paused → Active` and `InsufficientBalance → Active` are permitted.
+/// `Paused → Active`, `GracePeriod → Active`, and `InsufficientBalance → Active` are permitted.
 /// Any other source state (including `Cancelled`) returns [`Error::InvalidStatusTransition`].
 ///
 /// # Events
@@ -462,6 +479,13 @@ pub fn do_resume_subscription(
     // Idempotent: already active — nothing to do, no event.
     if sub.status == SubscriptionStatus::Active {
         return Ok(());
+    }
+
+    if (sub.status == SubscriptionStatus::InsufficientBalance
+        || sub.status == SubscriptionStatus::GracePeriod)
+        && sub.prepaid_balance < sub.amount
+    {
+        return Err(Error::InsufficientBalance);
     }
 
     sub.status = SubscriptionStatus::Active;

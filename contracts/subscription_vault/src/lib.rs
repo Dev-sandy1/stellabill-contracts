@@ -599,7 +599,7 @@ impl SubscriptionVault {
         subscription::do_pause_subscription(&env, subscription_id, authorizer)
     }
 
-    /// Resume a subscription to Active. Allowed from Paused or InsufficientBalance.
+    /// Resume a subscription to Active. Allowed from Paused, GracePeriod, or InsufficientBalance.
     pub fn resume_subscription(
         env: Env,
         subscription_id: u32,
@@ -624,10 +624,13 @@ impl SubscriptionVault {
     ///
     /// **This function is disabled when the emergency stop is active.**
     ///
-    /// Enforces strict interval timing and replay protection.
+    /// Enforces strict interval timing and replay protection. Underfunded attempts
+    /// move the subscription into a recoverable non-active state and emit a
+    /// charge-failed event without mutating financial accounting fields.
     pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
         require_not_emergency_stop(&env)?;
-        charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
+        charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)?;
+        Ok(())
     }
 
     /// Charge a metered usage amount against the subscription's prepaid balance.
@@ -1018,10 +1021,12 @@ impl SubscriptionVault {
     }
 
     /// Get the global configuration for a merchant.
-    pub fn get_merchant_config(env: Env, merchant: Address) -> Option<crate::types::MerchantConfig> {
+    pub fn get_merchant_config(
+        env: Env,
+        merchant: Address,
+    ) -> Option<crate::types::MerchantConfig> {
         merchant::get_merchant_config(&env, merchant)
     }
-
 }
 
 #[cfg(test)]

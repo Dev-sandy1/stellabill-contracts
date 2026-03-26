@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::charge_core::charge_one;
+use crate::charge_core::{charge_one, ChargeExecutionResult};
 use crate::types::{
     AcceptedToken, AdminRotatedEvent, BatchChargeResult, Error, RecoveryEvent, RecoveryReason,
 };
@@ -196,9 +196,13 @@ pub fn do_batch_charge(
     for id in subscription_ids.iter() {
         let r = charge_one(env, id, now, None);
         let res = match &r {
-            Ok(()) => BatchChargeResult {
+            Ok(ChargeExecutionResult::Charged) => BatchChargeResult {
                 success: true,
                 error_code: 0,
+            },
+            Ok(ChargeExecutionResult::InsufficientBalance) => BatchChargeResult {
+                success: false,
+                error_code: Error::InsufficientBalance.to_code(),
             },
             Err(e) => BatchChargeResult {
                 success: false,

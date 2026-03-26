@@ -631,6 +631,32 @@ pub struct SubscriptionChargedEvent {
     pub lifetime_charged: i128,
 }
 
+/// Event emitted when an interval charge attempt cannot be completed due to
+/// insufficient prepaid balance.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionChargeFailedEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub required_amount: i128,
+    pub available_balance: i128,
+    pub shortfall: i128,
+    pub resulting_status: SubscriptionStatus,
+    pub timestamp: u64,
+}
+
+/// Event emitted after a deposit when a previously underfunded subscription is
+/// ready to be resumed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionRecoveryReadyEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub prepaid_balance: i128,
+    pub required_amount: i128,
+    pub timestamp: u64,
+}
+
 /// Event emitted when a subscription is cancelled.
 #[contracttype]
 #[derive(Clone, Debug)]
