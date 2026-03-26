@@ -24,6 +24,8 @@ pub mod safe_math;
 mod state_machine;
 mod statements;
 mod subscription;
+#[cfg(test)]
+mod test;
 mod types;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
