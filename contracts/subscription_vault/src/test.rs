@@ -841,6 +841,107 @@ fn test_deposit_funds_basic() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #403)")]
+fn test_deposit_funds_unauthorized() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let other = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&other, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Other user tries to deposit into subscriber's vault
+    client.deposit_funds(&id, &other, &5_000_000);
+}
+
+#[test]
+fn test_deposit_funds_event_payload() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&subscriber, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    client.deposit_funds(&id, &subscriber, &15_000_000);
+
+    let events = env.events().all();
+    let deposit_event = events.last().expect("No events found");
+
+    // Verify event topics: (Symbol("deposited"), subscription_id)
+    assert_eq!(deposit_event.0, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &deposit_event.1.get(0).expect("Missing topic 0")),
+        Symbol::new(&env, "deposited")
+    );
+    assert_eq!(
+        u32::from_val(&env, &deposit_event.1.get(1).expect("Missing topic 1")),
+        id
+    );
+
+    // Verify event data: FundsDepositedEvent { subscription_id, subscriber, amount, prepaid_balance }
+    let event_data: crate::FundsDepositedEvent = deposit_event.2.into_val(&env);
+    assert_eq!(event_data.subscription_id, id);
+    assert_eq!(event_data.subscriber, subscriber);
+    assert_eq!(event_data.amount, 15_000_000);
+    assert_eq!(event_data.prepaid_balance, 15_000_000);
+}
+
+#[test]
+fn test_deposit_funds_cei_compliance() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&subscriber, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    let initial_contract_balance = token_client.balance(&client.address);
+    let deposit_amount = 20_000_000i128;
+
+    client.deposit_funds(&id, &subscriber, &deposit_amount);
+
+    // Check effects (state)
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, deposit_amount);
+
+    // Check interactions (transfer)
+    assert_eq!(
+        token_client.balance(&client.address),
+        initial_contract_balance + deposit_amount
+    );
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #402)")]
 fn test_deposit_funds_below_minimum() {
     let (env, client, token, _) = setup_test_env();
