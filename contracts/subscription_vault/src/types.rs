@@ -39,6 +39,7 @@ pub enum DataKey {
     /// Merchant-wide pause flag.
     MerchantPaused(Address),
     BillingStatement(u32, u32),
+
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
     MerchantTokens(Address),

@@ -16,6 +16,78 @@ use crate::safe_math::{safe_sub_balance, validate_non_negative};
 use crate::types::{Error, MerchantConfig, MerchantWithdrawalEvent};
 use soroban_sdk::{token, Address, Env, Symbol};
 
+pub fn get_merchant_paused(env: &Env, merchant: Address) -> bool {
+    // Check both legacy Pause state and new Config state if they overlap
+    if let Some(config) = get_merchant_config(env, merchant.clone()) {
+        if config.is_paused {
+            return true;
+        }
+    }
+    let key = DataKey::MerchantPaused(merchant);
+    env.storage().instance().get(&key).unwrap_or(false)
+}
+
+pub fn set_merchant_paused(env: &Env, merchant: Address, paused: bool) {
+    let key = DataKey::MerchantPaused(merchant);
+    env.storage().instance().set(&key, &paused);
+}
+
+pub fn pause_merchant(env: &Env, merchant: Address) -> Result<(), Error> {
+    merchant.require_auth();
+
+    if get_merchant_paused(env, merchant.clone()) {
+        return Ok(());
+    }
+
+    set_merchant_paused(env, merchant.clone(), true);
+
+    env.events().publish(
+        (Symbol::new(env, "merchant_paused"), merchant.clone()),
+        MerchantPausedEvent {
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(())
+}
+
+pub fn unpause_merchant(env: &Env, merchant: Address) -> Result<(), Error> {
+    merchant.require_auth();
+
+    if !get_merchant_paused(env, merchant.clone()) {
+        return Ok(());
+    }
+
+    set_merchant_paused(env, merchant.clone(), false);
+
+    env.events().publish(
+        (Symbol::new(env, "merchant_unpaused"), merchant.clone()),
+        MerchantUnpausedEvent {
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(())
+}
+
+pub fn set_merchant_config(
+    env: &Env,
+    merchant: Address,
+    config: MerchantConfig,
+) -> Result<(), Error> {
+    merchant.require_auth();
+    let key = DataKey::MerchantConfig(merchant);
+    env.storage().instance().set(&key, &config);
+    Ok(())
+}
+
+pub fn get_merchant_config(env: &Env, merchant: Address) -> Option<MerchantConfig> {
+    let key = DataKey::MerchantConfig(merchant);
+    env.storage().instance().get(&key)
+}
+
 fn merchant_balance_key(
     env: &Env,
     merchant: &Address,
@@ -184,15 +256,6 @@ pub fn credit_merchant_balance_for_token(
     Ok(())
 }
 
-/// Withdraw accumulated USDC from prior subscription charges to the merchant address.
-///
-/// **Reentrancy Protection**: This function follows the Checks-Effects-Interactions (CEI) pattern:
-/// 1. All validation happens first (checks)
-/// 2. Internal state is updated before any external calls (effects)
-/// 3. External token transfer happens last (interactions)
-///
-/// This ordering ensures that if the token contract attempts a callback into our contract,
-/// our internal state will already be consistent and the merchant balance will be correct.
 pub fn withdraw_merchant_funds(env: &Env, merchant: Address, amount: i128) -> Result<(), Error> {
     let token_addr = crate::admin::get_token(env)?;
     withdraw_merchant_funds_for_token(env, merchant, token_addr, amount)
@@ -212,9 +275,6 @@ pub fn withdraw_merchant_funds_for_token(
         return Err(Error::InvalidInput);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // CHECKS: Validate all preconditions before any state mutations
-    // ──────────────────────────────────────────────────────────────────────────
     let current = get_merchant_balance_by_token(env, &merchant, &token_addr);
     if current == 0 {
         return Err(Error::NotFound);
