@@ -736,7 +736,7 @@ fn test_subscription_struct_with_lifetime_cap() {
 
 #[test]
 fn test_charge_subscription_basic() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
@@ -1074,7 +1074,7 @@ fn test_deposit_funds_cei_compliance() {
 #[test]
 #[should_panic(expected = "Error(Contract, #402)")]
 fn test_deposit_funds_below_minimum() {
-    let (env, client, token, _) = setup_test_env();
+    let (env, client, _token, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     let id = client.create_subscription(
@@ -1101,7 +1101,7 @@ fn test_rotate_admin() {
 
 #[test]
 fn test_emergency_stop() {
-    let (env, client, _, admin) = setup_test_env();
+    let (_env, client, _, admin) = setup_test_env();
     assert!(!client.get_emergency_stop_status());
     client.enable_emergency_stop(&admin);
     assert!(client.get_emergency_stop_status());
@@ -1130,7 +1130,7 @@ fn test_create_subscription_blocked_by_emergency_stop() {
 
 #[test]
 fn test_batch_charge() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id1, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
