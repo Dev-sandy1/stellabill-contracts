@@ -75,6 +75,10 @@ pub enum SubscriptionStatus {
     InsufficientBalance = 3,
     /// Subscription is in grace period after a missed charge.
     GracePeriod = 4,
+    /// Subscription has automatically expired based on its expiration timestamp.
+    Expired = 5,
+    /// Subscription is archived (reduced storage, read-only).
+    Archived = 6,
 }
 
 /// Stores subscription details and current state.
@@ -116,9 +120,20 @@ pub struct Subscription {
     /// When `lifetime_cap` is `Some(cap)` and `lifetime_charged >= cap`, no
     /// further charges are processed and the subscription transitions to `Cancelled`.
     pub lifetime_charged: i128,
-    /// Timestamp when the current grace period started, if any.
-    /// Used to track grace period duration and expiration.
-    pub grace_start_timestamp: Option<u64>,
+    /// The timestamp when the subscription started.
+    pub start_time: u64,
+    /// The timestamp when the subscription expires. `None` means no expiration.
+    pub expires_at: Option<u64>,
+}
+
+impl Subscription {
+    pub fn is_expired(&self, current_time: u64) -> bool {
+        if let Some(exp) = self.expires_at {
+            current_time >= exp
+        } else {
+            false
+        }
+    }
 }
 
 /// Detailed error information for insufficient balance scenarios.
@@ -153,6 +168,8 @@ pub enum Error {
     Unauthorized = 401,
     /// Caller is authorized but does not have permission for this specific action.
     Forbidden = 403,
+    /// Subscription has expired based on its expires_at timestamp.
+    SubscriptionExpired = 410,
 
     // --- Not Found (404) ---
     /// The requested resource was not found in storage.
@@ -255,6 +272,7 @@ impl Error {
             Error::NotFound => 404,
             Error::Unauthorized => 401,
             Error::Forbidden => 403,
+            Error::SubscriptionExpired => 410,
             Error::IntervalNotElapsed => 1001,
             Error::NotActive => 1002,
             Error::InvalidStatusTransition => 400,
@@ -342,6 +360,8 @@ pub struct SubscriptionSummary {
     pub usage_enabled: bool,
     pub lifetime_cap: Option<i128>,
     pub lifetime_charged: i128,
+    pub start_time: u64,
+    pub expires_at: Option<u64>,
 }
 
 /// Event emitted when subscriptions are exported for migration.
@@ -590,6 +610,7 @@ pub struct SubscriptionCreatedEvent {
     pub amount: i128,
     pub interval_seconds: u64,
     pub lifetime_cap: Option<i128>,
+    pub expires_at: Option<u64>,
 }
 
 /// Event emitted when funds are deposited into a subscription vault.
@@ -661,6 +682,22 @@ pub struct SubscriptionPausedEvent {
 pub struct SubscriptionResumedEvent {
     pub subscription_id: u32,
     pub authorizer: Address,
+}
+
+/// Event emitted when a subscription is automatically expired.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionExpiredEvent {
+    pub subscription_id: u32,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a subscription is archived.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionArchivedEvent {
+    pub subscription_id: u32,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a merchant withdraws funds.

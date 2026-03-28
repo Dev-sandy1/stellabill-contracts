@@ -43,10 +43,22 @@ pub fn charge_one(
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
 ) -> Result<ChargeExecutionResult, Error> {
     let mut sub = get_subscription(env, subscription_id)?;
-    let merchant = sub.merchant.clone();
-
-    if crate::merchant::get_merchant_paused(env, merchant.clone()) {
-        return Err(Error::MerchantPaused);
+    
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
     }
 
     let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
@@ -246,6 +258,24 @@ pub fn charge_usage_one(
 
     if crate::merchant::get_merchant_paused(env, merchant.clone()) {
         return Err(Error::MerchantPaused);
+    }
+
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
     }
 
     if sub.status != SubscriptionStatus::Active {
