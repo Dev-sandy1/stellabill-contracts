@@ -31,6 +31,8 @@ use crate::types::{
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+const MIN_SUBSCRIPTION_INTERVAL_SECONDS: u64 = 60;
+
 #[allow(dead_code)]
 pub fn next_id(env: &Env) -> u32 {
     let key = Symbol::new(env, "next_id");
@@ -198,6 +200,7 @@ pub fn do_create_subscription(
     interval_seconds: u64,
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
+    expires_at: Option<u64>,
 ) -> Result<u32, Error> {
     let token = crate::admin::get_token(env)?;
 
@@ -213,6 +216,7 @@ pub fn do_create_subscription(
         interval_seconds,
         usage_enabled,
         lifetime_cap,
+        expires_at,
     )
 }
 
@@ -226,21 +230,33 @@ pub fn do_create_subscription_with_token(
     interval_seconds: u64,
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
+    expires_at: Option<u64>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
-    validate_non_negative(amount)?;
 
-    if interval_seconds == 0 {
+    if crate::blocklist::is_blocklisted(env, &subscriber) {
+        return Err(Error::SubscriberBlocklisted);
+    }
+
+    validate_non_negative(amount)?;
+    if amount == 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    if interval_seconds < MIN_SUBSCRIPTION_INTERVAL_SECONDS {
         return Err(Error::InvalidInput);
     }
+
     if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
     }
 
-    // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
         if cap <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        if cap < amount {
+            return Err(Error::InvalidInput);
         }
     }
 
@@ -259,7 +275,8 @@ pub fn do_create_subscription_with_token(
         usage_enabled,
         lifetime_cap,
         lifetime_charged: 0i128,
-        grace_start_timestamp: None,
+        start_time: env.ledger().timestamp(),
+        expires_at,
     };
 
     // Allocate ID with overflow / limit guard.
@@ -302,6 +319,7 @@ pub fn do_create_subscription_with_token(
             amount,
             interval_seconds,
             lifetime_cap,
+            expires_at,
         ),
     );
 
@@ -315,11 +333,7 @@ pub fn do_deposit_funds(
     amount: i128,
 ) -> Result<(), Error> {
     subscriber.require_auth();
-
-    // Blocklist check: prevent blocklisted subscribers from depositing funds
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
+    crate::blocklist::require_not_blocklisted(env, &subscriber)?;
 
     // CHECKS: Validate all preconditions before any state mutations
     let min_topup: i128 = crate::admin::get_min_topup(env)?;
@@ -329,8 +343,23 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    if subscriber != sub.subscriber {
-        return Err(Error::Forbidden);
+    
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
     }
 
     let token_addr = sub.token.clone();
@@ -345,6 +374,8 @@ pub fn do_deposit_funds(
     // INTERACTIONS
     let token_client = soroban_sdk::token::Client::new(env, &token_addr);
     token_client.transfer(&subscriber, &env.current_contract_address(), &amount);
+
+    crate::accounting::add_total_accounted(env, &token_addr, amount)?;
 
     env.events().publish(
         (Symbol::new(env, "deposited"), subscription_id),
@@ -395,6 +426,10 @@ pub fn do_cancel_subscription(
 
     let mut sub = get_subscription(env, subscription_id)?;
 
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
+    }
+
     if authorizer != sub.subscriber && authorizer != sub.merchant {
         return Err(Error::Forbidden);
     }
@@ -438,9 +473,8 @@ pub fn do_pause_subscription(
 
     let mut sub = get_subscription(env, subscription_id)?;
 
-    // Actor check: only subscriber or merchant may pause.
-    if authorizer != sub.subscriber && authorizer != sub.merchant {
-        return Err(Error::Forbidden);
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
     }
 
     validate_status_transition(&sub.status, &SubscriptionStatus::Paused)?;
@@ -485,9 +519,11 @@ pub fn do_resume_subscription(
 
     let mut sub = get_subscription(env, subscription_id)?;
 
-    // Actor check: only subscriber or merchant may resume.
-    if authorizer != sub.subscriber && authorizer != sub.merchant {
-        return Err(Error::Forbidden);
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
+    }
+    if authorizer == sub.subscriber {
+        crate::blocklist::require_not_blocklisted(env, &sub.subscriber)?;
     }
 
     validate_status_transition(&sub.status, &SubscriptionStatus::Active)?;
@@ -530,6 +566,25 @@ pub fn do_charge_one_off(
     merchant.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+    
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
+    }
+
     if sub.merchant != merchant {
         return Err(Error::Unauthorized);
     }
@@ -544,13 +599,13 @@ pub fn do_charge_one_off(
     }
 
     // Enforce lifetime cap for one-off charges
+    let new_charged = safe_add(sub.lifetime_charged, amount)?;
     if let Some(cap) = sub.lifetime_cap {
-        let new_charged = safe_add(sub.lifetime_charged, amount)?;
         if new_charged > cap {
             return Err(Error::LifetimeCapReached);
         }
-        sub.lifetime_charged = new_charged;
     }
+    sub.lifetime_charged = new_charged;
 
     sub.prepaid_balance = safe_sub(sub.prepaid_balance, amount)?;
 
@@ -585,6 +640,51 @@ pub fn do_charge_one_off(
     Ok(())
 }
 
+pub fn do_cleanup_subscription(
+    env: &Env,
+    subscription_id: u32,
+    authorizer: Address,
+) -> Result<(), Error> {
+    authorizer.require_auth();
+
+    let mut sub = get_subscription(env, subscription_id)?;
+
+    // Can only cleanup if it's already expired or cancelled
+    let now = env.ledger().timestamp();
+    let is_terminal = sub.status == SubscriptionStatus::Cancelled || sub.is_expired(now);
+    
+    if !is_terminal {
+        return Err(Error::NotActive); // Or some other error, meaning it's not terminal
+    }
+
+    if sub.status != SubscriptionStatus::Archived {
+        // If it's expired but not yet marked as Expired or Cancelled, transition it to Expired first
+        if sub.status != SubscriptionStatus::Cancelled && sub.status != SubscriptionStatus::Expired && sub.is_expired(now) {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+        }
+
+        validate_status_transition(&sub.status, &SubscriptionStatus::Archived)?;
+        sub.status = SubscriptionStatus::Archived;
+        env.storage().instance().set(&subscription_id, &sub);
+        
+        env.events().publish(
+            (Symbol::new(env, "subscription_archived"), subscription_id),
+            crate::types::SubscriptionArchivedEvent {
+                subscription_id,
+                timestamp: now,
+            },
+        );
+    }
+
+    // We do NOT delete the subscription, we keep it in Archived state
+    // We could potentially remove some metadata, but "remain readable" means we should keep core fields.
+    // The funds are preserved in `prepaid_balance` and can still be withdrawn because
+    // `do_withdraw_subscriber_funds` allows withdrawal in `Archived` state.
+
+    Ok(())
+}
+
 pub fn do_withdraw_subscriber_funds(
     env: &Env,
     subscription_id: u32,
@@ -598,7 +698,11 @@ pub fn do_withdraw_subscriber_funds(
         return Err(Error::Forbidden);
     }
 
-    if sub.status != SubscriptionStatus::Cancelled {
+    if sub.status != SubscriptionStatus::Cancelled
+        && sub.status != SubscriptionStatus::Expired
+        && sub.status != SubscriptionStatus::Archived
+        && !sub.is_expired(env.ledger().timestamp())
+    {
         return Err(Error::InvalidStatusTransition);
     }
 
@@ -610,23 +714,13 @@ pub fn do_withdraw_subscriber_funds(
     sub.prepaid_balance = 0;
     env.storage().instance().set(&subscription_id, &sub);
 
-    let token_addr = sub.token.clone();
-    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
-
-    token_client.transfer(
-        &env.current_contract_address(),
-        &subscriber,
-        &amount_to_refund,
-    );
-
-    env.events().publish(
-        (Symbol::new(env, "subscriber_withdrawal"), subscription_id),
-        SubscriberWithdrawalEvent {
-            subscription_id,
-            subscriber,
-            amount: amount_to_refund,
-        },
-    );
+        token_client.transfer(
+            &env.current_contract_address(),
+            &subscriber,
+            &amount_to_refund,
+        );
+        crate::accounting::sub_total_accounted(env, &token_addr, amount_to_refund)?;
+    }
 
     Ok(())
 }
@@ -676,6 +770,7 @@ pub fn do_partial_refund(
     // Interactions: transfer refund from vault to subscriber.
     let token_client = soroban_sdk::token::Client::new(env, &sub.token);
     token_client.transfer(&env.current_contract_address(), &subscriber, &amount);
+    crate::accounting::sub_total_accounted(env, &token_addr, amount)?;
 
     env.events().publish(
         (Symbol::new(env, "partial_refund"), subscription_id),
@@ -768,6 +863,7 @@ pub fn do_create_subscription_from_plan(
     plan_template_id: u32,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
+    crate::blocklist::require_not_blocklisted(env, &subscriber)?;
 
     let plan = get_plan_template(env, plan_template_id)?;
 
@@ -795,7 +891,8 @@ pub fn do_create_subscription_from_plan(
         usage_enabled: plan.usage_enabled,
         lifetime_cap: plan.lifetime_cap,
         lifetime_charged: 0i128,
-        grace_start_timestamp: None,
+        start_time: env.ledger().timestamp(),
+        expires_at: None, // Subscriptions from plan templates have no fixed expiration by default
     };
 
     env.storage().instance().set(&id, &sub);
@@ -902,6 +999,7 @@ pub fn do_migrate_subscription_to_plan(
     new_plan_template_id: u32,
 ) -> Result<(), Error> {
     subscriber.require_auth();
+    crate::blocklist::require_not_blocklisted(env, &subscriber)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
     if sub.subscriber != subscriber {
