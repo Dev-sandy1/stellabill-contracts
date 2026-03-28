@@ -77,12 +77,7 @@ const MAX_EXPORT_LIMIT: u32 = 100;
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn require_admin_auth(env: &Env, admin: &Address) -> Result<(), Error> {
-    admin.require_auth();
-    let stored_admin = admin::require_admin(env)?;
-    if admin != &stored_admin {
-        return Err(Error::Unauthorized);
-    }
-    Ok(())
+    admin::require_admin_auth(env, admin)
 }
 
 fn get_emergency_stop(env: &Env) -> bool {
@@ -548,7 +543,7 @@ impl SubscriptionVault {
         )
     }
 
-    /// Set a per-subscriber credit limit for a specific settlement token.
+    /// Set a per-subscriber credit limit for a specific settlement token. Admin only.
     ///
     /// The limit is expressed in token base units and applies across all of the
     /// subscriber's subscriptions using that token. When the aggregate exposure
