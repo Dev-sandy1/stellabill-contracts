@@ -39,6 +39,24 @@ pub fn charge_one(
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
 ) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+    
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
+    }
+
     let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
 
     if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
@@ -207,6 +225,24 @@ pub fn charge_one(
 /// Debit a metered `usage_amount` from a subscription's prepaid balance.
 pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
+    }
 
     if sub.status != SubscriptionStatus::Active {
         return Err(Error::NotActive);

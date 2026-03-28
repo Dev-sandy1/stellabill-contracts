@@ -196,6 +196,7 @@ pub fn do_create_subscription(
     interval_seconds: u64,
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
+    expires_at: Option<u64>,
 ) -> Result<u32, Error> {
     let token = crate::admin::get_token(env)?;
 
@@ -211,6 +212,7 @@ pub fn do_create_subscription(
         interval_seconds,
         usage_enabled,
         lifetime_cap,
+        expires_at,
     )
 }
 
@@ -224,6 +226,7 @@ pub fn do_create_subscription_with_token(
     interval_seconds: u64,
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
+    expires_at: Option<u64>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
     validate_non_negative(amount)?;
@@ -257,6 +260,8 @@ pub fn do_create_subscription_with_token(
         usage_enabled,
         lifetime_cap,
         lifetime_charged: 0i128,
+        start_time: env.ledger().timestamp(),
+        expires_at,
     };
 
     // Allocate ID with overflow / limit guard.
@@ -297,6 +302,7 @@ pub fn do_create_subscription_with_token(
             amount,
             interval_seconds,
             lifetime_cap,
+            expires_at,
         ),
     );
 
@@ -324,6 +330,25 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
+    
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
+    }
+
     let token_addr = sub.token.clone();
 
     // Enforce credit limit for additional prepaid balance being loaded.
@@ -355,6 +380,10 @@ pub fn do_cancel_subscription(
 
     let mut sub = get_subscription(env, subscription_id)?;
 
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
+    }
+
     if authorizer != sub.subscriber && authorizer != sub.merchant {
         return Err(Error::Forbidden);
     }
@@ -374,6 +403,11 @@ pub fn do_pause_subscription(
     authorizer.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Paused)?;
     sub.status = SubscriptionStatus::Paused;
 
@@ -389,6 +423,11 @@ pub fn do_resume_subscription(
     authorizer.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+
+    if sub.is_expired(env.ledger().timestamp()) {
+        return Err(Error::SubscriptionExpired);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Active)?;
     sub.status = SubscriptionStatus::Active;
 
@@ -408,6 +447,25 @@ pub fn do_charge_one_off(
     merchant.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+    
+    let now = env.ledger().timestamp();
+    // Expiration guard
+    if sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Expired {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+            env.storage().instance().set(&subscription_id, &sub);
+            env.events().publish(
+                (Symbol::new(env, "subscription_expired"), subscription_id),
+                crate::types::SubscriptionExpiredEvent {
+                    subscription_id,
+                    timestamp: now,
+                },
+            );
+        }
+        return Err(Error::SubscriptionExpired);
+    }
+
     if sub.merchant != merchant {
         return Err(Error::Unauthorized);
     }
@@ -451,6 +509,51 @@ pub fn do_charge_one_off(
     Ok(())
 }
 
+pub fn do_cleanup_subscription(
+    env: &Env,
+    subscription_id: u32,
+    authorizer: Address,
+) -> Result<(), Error> {
+    authorizer.require_auth();
+
+    let mut sub = get_subscription(env, subscription_id)?;
+
+    // Can only cleanup if it's already expired or cancelled
+    let now = env.ledger().timestamp();
+    let is_terminal = sub.status == SubscriptionStatus::Cancelled || sub.is_expired(now);
+    
+    if !is_terminal {
+        return Err(Error::NotActive); // Or some other error, meaning it's not terminal
+    }
+
+    if sub.status != SubscriptionStatus::Archived {
+        // If it's expired but not yet marked as Expired or Cancelled, transition it to Expired first
+        if sub.status != SubscriptionStatus::Cancelled && sub.status != SubscriptionStatus::Expired && sub.is_expired(now) {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
+            sub.status = SubscriptionStatus::Expired;
+        }
+
+        validate_status_transition(&sub.status, &SubscriptionStatus::Archived)?;
+        sub.status = SubscriptionStatus::Archived;
+        env.storage().instance().set(&subscription_id, &sub);
+        
+        env.events().publish(
+            (Symbol::new(env, "subscription_archived"), subscription_id),
+            crate::types::SubscriptionArchivedEvent {
+                subscription_id,
+                timestamp: now,
+            },
+        );
+    }
+
+    // We do NOT delete the subscription, we keep it in Archived state
+    // We could potentially remove some metadata, but "remain readable" means we should keep core fields.
+    // The funds are preserved in `prepaid_balance` and can still be withdrawn because
+    // `do_withdraw_subscriber_funds` allows withdrawal in `Archived` state.
+
+    Ok(())
+}
+
 pub fn do_withdraw_subscriber_funds(
     env: &Env,
     subscription_id: u32,
@@ -464,7 +567,11 @@ pub fn do_withdraw_subscriber_funds(
         return Err(Error::Forbidden);
     }
 
-    if sub.status != SubscriptionStatus::Cancelled {
+    if sub.status != SubscriptionStatus::Cancelled
+        && sub.status != SubscriptionStatus::Expired
+        && sub.status != SubscriptionStatus::Archived
+        && !sub.is_expired(env.ledger().timestamp())
+    {
         return Err(Error::InvalidStatusTransition);
     }
 
@@ -640,6 +747,8 @@ pub fn do_create_subscription_from_plan(
         usage_enabled: plan.usage_enabled,
         lifetime_cap: plan.lifetime_cap,
         lifetime_charged: 0i128,
+        start_time: env.ledger().timestamp(),
+        expires_at: None, // Subscriptions from plan templates have no fixed expiration by default
     };
 
     env.storage().instance().set(&id, &sub);

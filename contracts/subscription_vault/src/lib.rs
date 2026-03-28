@@ -262,6 +262,8 @@ impl SubscriptionVault {
             usage_enabled: sub.usage_enabled,
             lifetime_cap: sub.lifetime_cap,
             lifetime_charged: sub.lifetime_charged,
+            start_time: sub.start_time,
+            expires_at: sub.expires_at,
         })
     }
 
@@ -308,6 +310,8 @@ impl SubscriptionVault {
                     usage_enabled: sub.usage_enabled,
                     lifetime_cap: sub.lifetime_cap,
                     lifetime_charged: sub.lifetime_charged,
+                    start_time: sub.start_time,
+                    expires_at: sub.expires_at,
                 });
                 exported += 1;
             }
@@ -352,6 +356,7 @@ impl SubscriptionVault {
         interval_seconds: u64,
         usage_enabled: bool,
         lifetime_cap: Option<i128>,
+        expires_at: Option<u64>,
     ) -> Result<u32, Error> {
         require_not_emergency_stop(&env)?;
         subscription::do_create_subscription(
@@ -362,6 +367,7 @@ impl SubscriptionVault {
             interval_seconds,
             usage_enabled,
             lifetime_cap,
+            expires_at,
         )
     }
 
@@ -376,6 +382,7 @@ impl SubscriptionVault {
         interval_seconds: u64,
         usage_enabled: bool,
         lifetime_cap: Option<i128>,
+        expires_at: Option<u64>,
     ) -> Result<u32, Error> {
         require_not_emergency_stop(&env)?;
         subscription::do_create_subscription_with_token(
@@ -387,6 +394,7 @@ impl SubscriptionVault {
             interval_seconds,
             usage_enabled,
             lifetime_cap,
+            expires_at,
         )
     }
 
@@ -608,6 +616,16 @@ impl SubscriptionVault {
         authorizer: Address,
     ) -> Result<(), Error> {
         subscription::do_resume_subscription(&env, subscription_id, authorizer)
+    }
+
+    /// Archive an expired or cancelled subscription to mark it as clean up.
+    /// This preserves funds and allows withdrawal but prevents other actions.
+    pub fn cleanup_subscription(
+        env: Env,
+        subscription_id: u32,
+        authorizer: Address,
+    ) -> Result<(), Error> {
+        subscription::do_cleanup_subscription(&env, subscription_id, authorizer)
     }
 
     /// Merchant-initiated one-off charge against the subscription's prepaid balance.
@@ -952,3 +970,5 @@ impl SubscriptionVault {
 mod test;
 #[cfg(test)]
 mod test_recovery;
+#[cfg(test)]
+mod test_expiration;
