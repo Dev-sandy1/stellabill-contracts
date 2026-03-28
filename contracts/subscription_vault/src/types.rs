@@ -42,50 +42,8 @@ pub enum DataKey {
 
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
-    MerchantTokens(Address),
-    MerchantEarnings(Address, Address),
-    UsageLimits(u32),
-    UsageState(u32),
-    MerchantConfig(Address),
-}
-
-/// Accrued totals by charge kind.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccruedTotals {
-    pub interval: i128,
-    pub usage: i128,
-    pub one_off: i128,
-}
-
-/// Merchant token-scoped earnings.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenEarnings {
-    pub accruals: AccruedTotals,
-    pub withdrawals: i128,
-    pub refunds: i128,
-}
-
-/// Snapshot for merchant earnings reporting.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconciliationSnapshot {
-    pub total_accruals: i128,
-    pub total_withdrawals: i128,
-    pub total_refunds: i128,
-    pub computed_balance: i128,
-}
-
-/// A snapshot tied to a specific token.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenReconciliationSnapshot {
-    pub token: Address,
-    pub total_accruals: i128,
-    pub total_withdrawals: i128,
-    pub total_refunds: i128,
-    pub computed_balance: i128,
+    TotalAccounted(Address),
+    Recovery(String),
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -600,12 +558,14 @@ pub struct EmergencyStopDisabledEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryReason {
-    /// Funds sent to contract address by mistake.
-    AccidentalTransfer = 0,
-    /// Funds from deprecated contract flows or logic errors.
-    DeprecatedFlow = 1,
-    /// Funds from cancelled subscriptions with unreachable addresses.
-    UnreachableSubscriber = 2,
+    /// Overpayment by user, e.g. sending tokens directly to the contract.
+    UserOverpayment = 0,
+    /// Transfer failed or stalled in an unexpected state.
+    FailedTransfer = 1,
+    /// Escrow expired or subscription cancelled with unreachable user.
+    ExpiredEscrow = 2,
+    /// System or logic correction.
+    SystemCorrection = 3,
 }
 
 /// Event emitted when admin recovers stranded funds.
@@ -614,6 +574,7 @@ pub enum RecoveryReason {
 pub struct RecoveryEvent {
     pub admin: Address,
     pub recipient: Address,
+    pub token: Address,
     pub amount: i128,
     pub reason: RecoveryReason,
     pub timestamp: u64,

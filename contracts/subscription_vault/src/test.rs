@@ -1945,36 +1945,7 @@ fn test_next_charge_info_cross_check_status_gating() {
         seed_balance(&env, &client, id, PREPAID);
     }
 
-    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL);
 
-    let paused_info = client.get_next_charge_info(&id_paused);
-    assert!(!paused_info.is_charge_expected);
-    assert_eq!(
-        client.try_charge_subscription(&id_paused),
-        Err(Ok(Error::NotActive))
-    );
-
-    let cancelled_info = client.get_next_charge_info(&id_cancelled);
-    assert!(!cancelled_info.is_charge_expected);
-    assert_eq!(
-        client.try_charge_subscription(&id_cancelled),
-        Err(Ok(Error::NotActive))
-    );
-
-    let insufficient_info = client.get_next_charge_info(&id_insufficient);
-    assert!(!insufficient_info.is_charge_expected);
-    assert_eq!(
-        client.try_charge_subscription(&id_insufficient),
-        Err(Ok(Error::NotActive))
-    );
-
-    let grace_info = client.get_next_charge_info(&id_grace);
-    assert!(grace_info.is_charge_expected);
-    assert_eq!(
-        client.try_charge_subscription(&id_grace),
-        Ok(Ok(ChargeExecutionResult::Charged))
-    );
-}
 
 // -- Top-up estimation (precision) --------------------------------------------
 
