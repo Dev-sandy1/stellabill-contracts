@@ -1214,11 +1214,9 @@ fn test_deposit_funds_cei_compliance() {
         &INTERVAL,
         &false,
         &None::<i128>,
-     &None::<u64>);
-}
-
-// -- Batch charge tests -------------------------------------------------------
-
+        &None::<u64>,
+    );
+    
     let initial_contract_balance = token_client.balance(&client.address);
     let deposit_amount = 20_000_000i128;
 
@@ -1234,6 +1232,8 @@ fn test_deposit_funds_cei_compliance() {
         initial_contract_balance + deposit_amount
     );
 }
+
+// -- Batch charge tests -------------------------------------------------------
 
 #[test]
 #[should_panic(expected = "Error(Contract, #402)")]
