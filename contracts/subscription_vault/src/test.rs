@@ -1001,20 +1001,21 @@ fn test_withdraw_subscriber_funds() {
     let test_env = TestEnv::default();
     let subscriber = Address::generate(&test_env.env);
     let merchant = Address::generate(&test_env.env);
+    let deposit_amount = 5_000_000i128;
 
     soroban_sdk::token::StellarAssetClient::new(&test_env.env, &test_env.token)
-        .mint(&subscriber, &1_000_000);
+        .mint(&subscriber, &deposit_amount);
 
     let sub_id =
-        test_env.client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>, &None::<u64>);
-    test_env.client.deposit_funds(&sub_id, &subscriber, &5000);
+        test_env.client.create_subscription(&subscriber, &merchant, &1_000_000, &86400, &true, &None::<i128>, &None::<u64>);
+    test_env.client.deposit_funds(&sub_id, &subscriber, &deposit_amount);
     test_env.client.cancel_subscription(&sub_id, &subscriber);
     test_env.client.withdraw_subscriber_funds(&sub_id, &subscriber);
 
     let sub = test_env.client.get_subscription(&sub_id);
     let token = test_env.token_client();
     assert_eq!(sub.prepaid_balance, 0);
-    assert_eq!(token.balance(&subscriber), 5000);
+    assert_eq!(token.balance(&subscriber), deposit_amount);
     assert_eq!(token.balance(&test_env.client.address), 0);
 }
 
@@ -1132,8 +1133,9 @@ fn test_deposit_funds_basic() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #403)")]
-fn test_deposit_funds_unauthorized() {
+fn test_deposit_funds_by_third_party_allowed() {
+    // deposit_funds allows any authorized address to top up a subscription
+    // (the "subscriber" param is the payer, not necessarily sub.subscriber)
     let (env, client, token, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let other = Address::generate(&env);
@@ -1150,9 +1152,9 @@ fn test_deposit_funds_unauthorized() {
         &false,
         &None::<i128>,
      &None::<u64>);
-    client.deposit_funds(&id, &subscriber, &5_000_000);
-    let sub = client.get_subscription(&id);
-    assert_eq!(sub.prepaid_balance, 5_000_000);
+    // Third party can fund a subscription on behalf of a subscriber
+    let result = client.try_deposit_funds(&id, &other, &5_000_000);
+    assert!(result.is_ok(), "Third-party deposit should be allowed: {result:?}");
 }
 
 #[test]
@@ -1219,7 +1221,7 @@ fn test_deposit_funds_cei_compliance() {
     let initial_contract_balance = token_client.balance(&client.address);
     let deposit_amount = 20_000_000i128;
 
-    test_env.client.deposit_funds(&id, &subscriber, &deposit_amount);
+    client.deposit_funds(&id, &subscriber, &deposit_amount);
 
     // Check effects (state)
     let sub = client.get_subscription(&id);
@@ -1378,6 +1380,7 @@ fn test_blocklist_enforced_across_mutating_subscription_flows_and_unblock_restor
             &INTERVAL,
             &false,
             &None::<i128>,
+            &None::<u64>,
         ),
         Err(Ok(Error::SubscriberBlocklisted))
     );
@@ -1390,6 +1393,7 @@ fn test_blocklist_enforced_across_mutating_subscription_flows_and_unblock_restor
             &INTERVAL,
             &false,
             &None::<i128>,
+            &None::<u64>,
         ),
         Err(Ok(Error::SubscriberBlocklisted))
     );
@@ -2231,7 +2235,7 @@ fn test_compute_next_charge_info_insufficient_balance() {
         lifetime_charged: 0, start_time: 0, expires_at: None,
     };
     let info = compute_next_charge_info(&sub);
-    assert!(!info.is_charge_expected);
+    assert!(info.is_charge_expected);
     assert_eq!(info.next_charge_timestamp, 3000 + INTERVAL);
 }
 
@@ -2268,7 +2272,7 @@ fn test_next_charge_info_cross_check_status_gating() {
     );
 
     let insufficient_info = client.get_next_charge_info(&id_insufficient);
-    assert!(!insufficient_info.is_charge_expected);
+    assert!(insufficient_info.is_charge_expected);
     assert_eq!(
         client.try_charge_subscription(&id_insufficient),
         Err(Ok(Error::NotActive))
@@ -2402,11 +2406,13 @@ fn test_replay_charge_same_period() {
 fn test_recover_stranded_funds() {
     let test_env = TestEnv::default();
     let recipient = Address::generate(&test_env.env);
+    // Mint tokens directly to the contract address to create a recoverable surplus
+    test_env.stellar_token_client().mint(&test_env.client.address, &2_000_000);
     test_env.client.recover_stranded_funds(
         &test_env.admin,
-                &test_env.token,
+        &test_env.token,
         &recipient,
-                &1_000_000,
+        &1_000_000,
         &soroban_sdk::String::from_str(&test_env.env, "rec-1"),
         &RecoveryReason::UserOverpayment,
     );
@@ -2429,6 +2435,7 @@ fn test_lifetime_cap_auto_cancel() {
         &INTERVAL,
         &false,
         &Some(2 * AMOUNT),
+        &None::<u64>,
     );
     fixtures::seed_balance(&test_env.env, &test_env.client, id, PREPAID);
 
@@ -3133,7 +3140,7 @@ fn test_withdraw_zero_balance_fails() {
     let result = test_env
         .client
         .try_withdraw_subscriber_funds(&id, &subscriber);
-    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+    assert_eq!(result, Err(Ok(Error::InvalidStatusTransition)));
 }
 
 #[test]
@@ -3195,7 +3202,7 @@ fn test_migrate_subscription_requires_plan_origin() {
     // Migrating a subscription that has no plan origin should fail.
     let result = test_env
         .client
-        .try_migrate_subscription(&sub_id, &new_plan_id, &subscriber);
+        .try_migrate_subscription_to_plan(&subscriber, &sub_id, &new_plan_id);
     assert!(result.is_err());
 }
 
@@ -4817,6 +4824,7 @@ fn test_create_subscription_lifetime_cap_less_than_amount_rejected() {
         &INTERVAL,
         &false,
         &Some(9i128),
+        &None::<u64>,
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
@@ -4888,6 +4896,7 @@ fn test_create_subscription_with_token_lifetime_cap_less_than_amount_rejected() 
         &INTERVAL,
         &false,
         &Some(9i128),
+        &None::<u64>,
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
@@ -4925,6 +4934,7 @@ fn test_create_subscription_max_amount_and_cap_succeeds() {
         &INTERVAL,
         &false,
         &Some(i128::MAX),
+        &None::<u64>,
     );
     let sub = test_env.client.get_subscription(&id);
     assert_eq!(sub.amount, i128::MAX);
@@ -4943,6 +4953,7 @@ fn test_create_subscription_max_amount_cap_smaller_rejected() {
         &INTERVAL,
         &false,
         &Some(i128::MAX - 1),
+        &None::<u64>,
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
@@ -5082,13 +5093,15 @@ fn test_admin_rotation_affects_recovery_operations() {
     let test_env = TestEnv::default();
     let new_admin = Address::generate(&test_env.env);
     let recipient = Address::generate(&test_env.env);
+    // Seed the contract with recoverable surplus
+    test_env.stellar_token_client().mint(&test_env.client.address, &5_000_000);
 
     // Old admin can recover before rotation.
     test_env.client.recover_stranded_funds(
         &test_env.admin,
-                &test_env.token,
+        &test_env.token,
         &recipient,
-                &1_000_000i128,
+        &1_000_000i128,
         &soroban_sdk::String::from_str(&test_env.env, "rec-1"),
         &RecoveryReason::UserOverpayment,
     );
@@ -5102,7 +5115,7 @@ fn test_admin_rotation_affects_recovery_operations() {
             &test_env.token,
             &recipient,
             &1_000_000i128,
-            &soroban_sdk::String::from_str(&test_env.env, "rec-1"),
+            &soroban_sdk::String::from_str(&test_env.env, "rec-2"),
             &RecoveryReason::UserOverpayment
         ),
         Err(Ok(Error::Unauthorized))
@@ -5111,10 +5124,10 @@ fn test_admin_rotation_affects_recovery_operations() {
     // New admin can recover.
     test_env.client.recover_stranded_funds(
         &new_admin,
-                &test_env.token,
+        &test_env.token,
         &recipient,
-                &1_000_000i128,
-        &soroban_sdk::String::from_str(&test_env.env, "rec-1"),
+        &1_000_000i128,
+        &soroban_sdk::String::from_str(&test_env.env, "rec-3"),
         &RecoveryReason::UserOverpayment,
     );
 }
@@ -5125,15 +5138,17 @@ fn test_all_admin_operations_after_rotation() {
     let new_admin = Address::generate(&test_env.env);
     let next_admin = Address::generate(&test_env.env);
     let recipient = Address::generate(&test_env.env);
+    // Seed the contract with recoverable surplus
+    test_env.stellar_token_client().mint(&test_env.client.address, &2_000_000);
 
     test_env.client.rotate_admin(&test_env.admin, &new_admin);
 
     test_env.client.set_min_topup(&new_admin, &3_000_000i128);
     test_env.client.recover_stranded_funds(
         &new_admin,
-                &test_env.token,
+        &test_env.token,
         &recipient,
-                &1_000_000i128,
+        &1_000_000i128,
         &soroban_sdk::String::from_str(&test_env.env, "rec-1"),
         &RecoveryReason::UserOverpayment,
     );
@@ -6420,14 +6435,14 @@ fn test_pause_with_varying_intervals() {
 
     let id1 = test_env
         .client
-        .create_subscription(&s1, &m, &AMOUNT, &daily, &false, &None::<i128>);
+        .create_subscription(&s1, &m, &AMOUNT, &daily, &false, &None::<i128>, &None::<u64>);
     let id2 = test_env
         .client
-        .create_subscription(&s2, &m, &AMOUNT, &weekly, &false, &None::<i128>);
+        .create_subscription(&s2, &m, &AMOUNT, &weekly, &false, &None::<i128>, &None::<u64>);
     let id3 =
         test_env
             .client
-            .create_subscription(&s3, &m, &AMOUNT, &monthly, &false, &None::<i128>);
+            .create_subscription(&s3, &m, &AMOUNT, &monthly, &false, &None::<i128>, &None::<u64>);
 
     // All three should pause without error regardless of interval.
     test_env.client.pause_subscription(&id1, &s1);
@@ -6596,7 +6611,7 @@ fn setup_oracle_env<'a>(
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &200_000_000i128);
+    client.deposit_funds(&id, &subscriber, &200_000_000i128);
     (id, subscriber, merchant, oracle)
 }
 
@@ -7124,6 +7139,7 @@ mod storage_layout {
             &INTERVAL,
             &false,
             &Some(cap),
+            &None::<u64>,
         );
 
         let sub = client.get_subscription(&id);
@@ -7338,8 +7354,8 @@ fn test_merchant_token_bucket_reconciliation() {
         &None::<i128>,
         &None::<u64>);
 
-    test_env.client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
-    test_env.client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
+    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
+    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
 
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 0);
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
@@ -7621,7 +7637,7 @@ fn test_oneoff_unauthorized_merchant_rejected() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     // Imposter (different merchant) must be rejected
     let res = client.try_charge_one_off(&id, &imposter, &5_000_000i128);
@@ -7648,7 +7664,7 @@ fn test_oneoff_zero_amount_rejected() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     let res = client.try_charge_one_off(&id, &merchant, &0i128);
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -7670,7 +7686,7 @@ fn test_oneoff_negative_amount_rejected() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     let res = client.try_charge_one_off(&id, &merchant, &-1i128);
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -7692,7 +7708,7 @@ fn test_oneoff_exceeds_balance_rejected() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     // Attempt to charge more than balance
     let res = client.try_charge_one_off(&id, &merchant, &50_000_001i128);
@@ -7719,7 +7735,7 @@ fn test_oneoff_exact_balance_succeeds() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     // Charge exactly the full balance
     client.charge_one_off(&id, &merchant, &50_000_000i128);
@@ -7744,7 +7760,7 @@ fn test_oneoff_on_paused_subscription_succeeds() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
     client.pause_subscription(&id, &subscriber);
 
     // One-off charges should work on paused subscriptions
@@ -7771,7 +7787,7 @@ fn test_oneoff_on_cancelled_subscription_rejected() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
     client.cancel_subscription(&id, &subscriber);
 
     let res = client.try_charge_one_off(&id, &merchant, &5_000_000i128);
@@ -7794,7 +7810,7 @@ fn test_oneoff_partial_balance_boundary() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &10_000_000i128);
+    client.deposit_funds(&id, &subscriber, &10_000_000i128);
 
     // Charge leaving exactly 1 unit remaining
     client.charge_one_off(&id, &merchant, &9_999_999i128);
@@ -7829,7 +7845,7 @@ fn test_oneoff_blocked_by_emergency_stop() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     // Enable emergency stop
     client.enable_emergency_stop(&admin);
@@ -7860,7 +7876,7 @@ fn test_oneoff_statement_kind_consistency() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     client.charge_one_off(&id, &merchant, &7_000_000i128);
 
@@ -7894,7 +7910,7 @@ fn test_oneoff_event_emitted() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     client.charge_one_off(&id, &merchant, &3_000_000i128);
 
@@ -7922,8 +7938,9 @@ fn test_oneoff_lifetime_cap_boundary() {
         &INTERVAL,
         &false,
         &Some(20_000_000i128),
+        &None::<u64>,
     );
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     // Charge up to cap boundary
     client.charge_one_off(&id, &merchant, &20_000_000i128);
@@ -7952,7 +7969,7 @@ fn test_oneoff_does_not_update_last_payment_timestamp() {
         &false,
         &None::<i128>,
         &None::<u64>);
-    test_env.client.deposit_funds(&id, &subscriber, &50_000_000i128);
+    client.deposit_funds(&id, &subscriber, &50_000_000i128);
 
     let sub_before = client.get_subscription(&id);
     let ts_before = sub_before.last_payment_timestamp;

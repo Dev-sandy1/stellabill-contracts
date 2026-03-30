@@ -477,6 +477,10 @@ pub fn do_pause_subscription(
         return Err(Error::SubscriptionExpired);
     }
 
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Paused)?;
 
     // Idempotent: already paused — nothing to do, no event.
@@ -521,6 +525,9 @@ pub fn do_resume_subscription(
 
     if sub.is_expired(env.ledger().timestamp()) {
         return Err(Error::SubscriptionExpired);
+    }
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
     }
     if authorizer == sub.subscriber {
         crate::blocklist::require_not_blocklisted(env, &sub.subscriber)?;

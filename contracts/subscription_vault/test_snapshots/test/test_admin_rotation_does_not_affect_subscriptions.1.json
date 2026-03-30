@@ -52,6 +52,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
@@ -198,7 +199,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "grace_start_timestamp"
+                                "symbol": "expires_at"
                               },
                               "val": "void"
                             },
@@ -252,6 +253,14 @@
                                   "hi": 0,
                                   "lo": 0
                                 }
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "start_time"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {

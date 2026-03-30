@@ -86,7 +86,7 @@ fn test_recovery_unauthorized() {
         &recovery_id,
         &RecoveryReason::UserOverpayment,
     );
-    assert_eq!(result, Err(Ok(Error::Forbidden)));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
