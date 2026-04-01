@@ -556,6 +556,10 @@ pub fn do_pause_subscription(
         return Err(Error::SubscriptionExpired);
     }
 
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Paused)?;
 
     // Idempotent: already paused — nothing to do, no event.
@@ -600,6 +604,9 @@ pub fn do_resume_subscription(
 
     if sub.is_expired(env.ledger().timestamp()) {
         return Err(Error::SubscriptionExpired);
+    }
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
     }
     if authorizer == sub.subscriber {
         crate::blocklist::require_not_blocklisted(env, &sub.subscriber)?;
@@ -817,6 +824,7 @@ pub fn do_withdraw_subscriber_funds(
 
     // EFFECTS: zero the balance before the external token transfer (CEI pattern).
     sub.prepaid_balance = 0;
+    let token_addr = sub.token.clone();
     env.storage().instance().set(&subscription_id, &sub);
 
     // INTERACTIONS: transfer refund from vault to subscriber.
@@ -883,7 +891,8 @@ pub fn do_partial_refund(
     env.storage().instance().set(&subscription_id, &sub);
 
     // Interactions: transfer refund from vault to subscriber.
-    let token_client = soroban_sdk::token::Client::new(env, &sub.token);
+    let token_addr = sub.token.clone();
+    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
     token_client.transfer(&env.current_contract_address(), &subscriber, &amount);
     crate::accounting::sub_total_accounted(env, &sub.token, amount)?;
 
