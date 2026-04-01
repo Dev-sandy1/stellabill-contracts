@@ -1,8 +1,9 @@
 //! Billing statement append-only storage, pagination, and compaction.
 
+use crate::safe_math::{safe_add, safe_sub};
 use crate::types::{
-    BillingChargeKind, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
-    BillingStatementAggregate, BillingStatementsPage, Error,
+    AccruedTotals, BillingChargeKind, BillingCompactionSummary, BillingRetentionConfig,
+    BillingStatement, BillingStatementAggregate, BillingStatementsPage, Error,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -28,6 +29,9 @@ fn aggregate_key(subscription_id: u32) -> (Symbol, u32) {
     (KEY_AGGREGATE, subscription_id)
 }
 
+/// Persist default retention (`keep_recent` detailed rows). Caller must enforce admin auth.
+///
+/// `u32::MAX` means no automatic pruning threshold (keep all detail until overridden at compaction).
 pub fn set_retention_config(env: &Env, keep_recent: u32) {
     env.storage()
         .instance()
@@ -50,6 +54,11 @@ pub fn get_compacted_aggregate(env: &Env, subscription_id: u32) -> BillingStatem
         .unwrap_or(BillingStatementAggregate {
             pruned_count: 0,
             total_amount: 0,
+            totals: AccruedTotals {
+                interval: 0,
+                usage: 0,
+                one_off: 0,
+            },
             oldest_period_start: None,
             newest_period_end: None,
         })
@@ -82,8 +91,14 @@ pub fn append_statement(
         kind,
     };
     storage.set(&statement_row_key(subscription_id, next), &statement);
-    storage.set(&next_statement_key(subscription_id), &(next + 1));
-    storage.set(&live_statement_key(subscription_id), &(live + 1));
+    storage.set(
+        &next_statement_key(subscription_id),
+        &(safe_add(next as i128, 1).unwrap_or(0) as u32),
+    );
+    storage.set(
+        &live_statement_key(subscription_id),
+        &(safe_add(live as i128, 1).unwrap_or(0) as u32),
+    );
 }
 
 pub fn get_total_statements(env: &Env, subscription_id: u32) -> u32 {
@@ -97,7 +112,7 @@ pub fn compact_subscription_statements(
     env: &Env,
     subscription_id: u32,
     keep_recent_override: Option<u32>,
-) -> BillingCompactionSummary {
+) -> Result<BillingCompactionSummary, Error> {
     let keep_recent = keep_recent_override.unwrap_or(get_retention_config(env).keep_recent);
     let storage = env.storage().instance();
     let next: u32 = storage
@@ -108,25 +123,34 @@ pub fn compact_subscription_statements(
         .unwrap_or(0);
 
     if live <= keep_recent || live == 0 {
-        return BillingCompactionSummary {
+        return Ok(BillingCompactionSummary {
             subscription_id,
             pruned_count: 0,
             kept_count: live,
             total_pruned_amount: 0,
-        };
+        });
     }
 
-    let target_pruned = live - keep_recent;
+    let target_pruned = (safe_sub(live as i128, keep_recent as i128).unwrap_or(0)) as u32;
     let mut removed = 0u32;
     let mut amount = 0i128;
     let mut oldest: Option<u64> = None;
     let mut newest: Option<u64> = None;
 
     let mut seq = 0u32;
+    let mut interval_amt = 0i128;
+    let mut usage_amt = 0i128;
+    let mut one_off_amt = 0i128;
+
     while seq < next && removed < target_pruned {
         let key = statement_row_key(subscription_id, seq);
         if let Some(row) = storage.get::<_, BillingStatement>(&key) {
-            amount = amount.saturating_add(row.amount);
+            amount = safe_add(amount, row.amount)?;
+            match row.kind {
+                BillingChargeKind::Interval => interval_amt = safe_add(interval_amt, row.amount)?,
+                BillingChargeKind::Usage => usage_amt = safe_add(usage_amt, row.amount)?,
+                BillingChargeKind::OneOff => one_off_amt = safe_add(one_off_amt, row.amount)?,
+            }
             oldest = match oldest {
                 Some(v) => Some(v.min(row.period_start)),
                 None => Some(row.period_start),
@@ -141,9 +165,19 @@ pub fn compact_subscription_statements(
         seq += 1;
     }
 
+    // Consistency check
+    if amount != (safe_add(safe_add(interval_amt, usage_amt)?, one_off_amt)?) {
+         return Err(Error::Underflow); // Or some other appropriate error
+    }
+
     let mut aggregate = get_compacted_aggregate(env, subscription_id);
-    aggregate.pruned_count = aggregate.pruned_count.saturating_add(removed);
-    aggregate.total_amount = aggregate.total_amount.saturating_add(amount);
+    aggregate.pruned_count =
+        (safe_add(aggregate.pruned_count as i128, removed as i128).unwrap_or(0)) as u32;
+    aggregate.total_amount = safe_add(aggregate.total_amount, amount)?;
+    aggregate.totals.interval = safe_add(aggregate.totals.interval, interval_amt)?;
+    aggregate.totals.usage = safe_add(aggregate.totals.usage, usage_amt)?;
+    aggregate.totals.one_off = safe_add(aggregate.totals.one_off, one_off_amt)?;
+    
     aggregate.oldest_period_start = match (aggregate.oldest_period_start, oldest) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (None, Some(b)) => Some(b),
@@ -159,12 +193,12 @@ pub fn compact_subscription_statements(
     let kept_count = live.saturating_sub(removed);
     storage.set(&live_statement_key(subscription_id), &kept_count);
 
-    BillingCompactionSummary {
+    Ok(BillingCompactionSummary {
         subscription_id,
         pruned_count: removed,
         kept_count,
         total_pruned_amount: amount,
-    }
+    })
 }
 
 /// Offset/limit pagination over active statements.

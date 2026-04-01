@@ -266,6 +266,12 @@
                             },
                             {
                               "key": {
+                                "symbol": "grace_start_timestamp"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "interval_seconds"
                               },
                               "val": {
@@ -423,6 +429,18 @@
                               "u32": 0
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "SchemaVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
                         }
                       },
                       {
