@@ -273,6 +273,12 @@
                             },
                             {
                               "key": {
+                                "symbol": "grace_start_timestamp"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "interval_seconds"
                               },
                               "val": {

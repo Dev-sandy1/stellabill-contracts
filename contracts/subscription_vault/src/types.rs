@@ -43,15 +43,15 @@ pub enum DataKey {
     BillingStatementsByMerchant(Address),
     TotalAccounted(Address),
     Recovery(String),
-    /// Per-merchant configuration blob.
+    /// Merchant configuration (pause state, fee routing, etc.).
     MerchantConfig(Address),
-    /// Per-merchant, per-token earnings record.
+    /// Per-merchant, per-token accrued earnings record.
     MerchantEarnings(Address, Address),
-    /// Set of token addresses a merchant has earned from.
+    /// List of token addresses a merchant has earned in.
     MerchantTokens(Address),
-    /// Usage rate-limit and cap configuration for a subscription.
+    /// Usage rate/cap limits for a subscription.
     UsageLimits(u32),
-    /// Mutable usage metering state for a subscription.
+    /// Running usage state for a subscription within the current window.
     UsageState(u32),
 }
 
@@ -133,6 +133,8 @@ pub struct Subscription {
     pub start_time: u64,
     /// The timestamp when the subscription expires. `None` means no expiration.
     pub expires_at: Option<u64>,
+    /// Timestamp when a grace-period started. `None` means not in grace period.
+    pub grace_start_timestamp: Option<u64>,
 }
 
 impl Subscription {
@@ -936,4 +938,43 @@ pub struct MerchantRefundEvent {
     pub subscriber: Address,
     pub token: Address,
     pub amount: i128,
+}
+
+/// Breakdown of a merchant's accrued earnings by charge kind.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccruedTotals {
+    /// Total earned from interval charges.
+    pub interval: i128,
+    /// Total earned from usage charges.
+    pub usage: i128,
+    /// Total earned from one-off charges.
+    pub one_off: i128,
+}
+
+/// Accumulated earnings for a merchant for a single token.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenEarnings {
+    /// Accrued charge totals broken down by kind.
+    pub accruals: AccruedTotals,
+    /// Total amount withdrawn by the merchant.
+    pub withdrawals: i128,
+    /// Total amount refunded to subscribers.
+    pub refunds: i128,
+}
+
+/// A reconciliation snapshot for one token, returned by `get_reconciliation_snapshot`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenReconciliationSnapshot {
+    pub token: Address,
+    /// Sum of all charges accrued (interval + usage + one_off).
+    pub total_accruals: i128,
+    /// Sum of all withdrawals.
+    pub total_withdrawals: i128,
+    /// Sum of all subscriber refunds.
+    pub total_refunds: i128,
+    /// Computed balance = total_accruals - withdrawals - refunds.
+    pub computed_balance: i128,
 }

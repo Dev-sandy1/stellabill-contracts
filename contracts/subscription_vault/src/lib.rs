@@ -87,6 +87,8 @@ mod statements;
 mod subscription;
 mod types;
 #[cfg(test)]
+mod test_utils;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod test_utils;
@@ -112,12 +114,14 @@ mod test_security;
 mod test_usage_limits;
 #[cfg(test)]
 mod test_deterministic_charging;
+#[cfg(test)]
+mod test_emergency_stop_lifetime_caps;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
-pub use queries::{compute_next_charge_info, MAX_SUBSCRIPTION_LIST_PAGE};
+pub use queries::{compute_next_charge_info, MAX_SCAN_DEPTH, MAX_SUBSCRIPTION_LIST_PAGE};
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
     AcceptedToken, AccruedTotals, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult,
@@ -326,6 +330,7 @@ impl SubscriptionVault {
     /// [`charge_usage`](Self::charge_usage), [`charge_usage_with_reference`](Self::charge_usage_with_reference),
     /// [`charge_one_off`](Self::charge_one_off), [`create_subscription`](Self::create_subscription),
     /// [`create_subscription_with_token`](Self::create_subscription_with_token),
+    /// [`create_subscription_from_plan`](Self::create_subscription_from_plan),
     /// [`deposit_funds`](Self::deposit_funds).
     ///
     /// Calling this when the stop is already active is a no-op (returns `Ok`).
@@ -874,6 +879,7 @@ impl SubscriptionVault {
         subscriber: Address,
         plan_template_id: u32,
     ) -> Result<u32, Error> {
+        require_not_emergency_stop(&env)?;
         subscription::do_create_subscription_from_plan(&env, subscriber, plan_template_id)
     }
 

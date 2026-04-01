@@ -105,6 +105,7 @@ mod test {
             lifetime_charged: 0,
             start_time: 0,
             expires_at: None,
+            grace_start_timestamp: None,
         }
     }
 
