@@ -35,9 +35,10 @@ use crate::safe_math::{safe_add, safe_sub, safe_sub_balance};
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, ChargeExecutionResult, DataKey, Error,
+    BillingChargeKind, BillingPeriodSnapshot, ChargeExecutionResult, DataKey, Error,
     LifetimeCapReachedEvent, Subscription, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
     SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
+    SNAPSHOT_FLAG_CLOSED, SNAPSHOT_FLAG_INTERVAL_CHARGED,
 };
 use soroban_sdk::{symbol_short, Env, String, Symbol};
 
@@ -218,6 +219,20 @@ pub fn charge_one(
                 BillingChargeKind::Interval,
                 next_allowed.saturating_sub(sub.interval_seconds),
                 now,
+            )?;
+
+            crate::period_snapshots::write_period_snapshot(
+                env,
+                BillingPeriodSnapshot {
+                    subscription_id,
+                    period_index,
+                    period_start: next_allowed.saturating_sub(sub.interval_seconds),
+                    period_end: now,
+                    total_charged: charge_amount,
+                    total_usage_units: 0,
+                    status_flags: SNAPSHOT_FLAG_CLOSED | SNAPSHOT_FLAG_INTERVAL_CHARGED,
+                    finalized_at: now,
+                },
             )?;
 
             // Record charged period and optional idempotency key

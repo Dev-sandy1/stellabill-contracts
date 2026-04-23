@@ -53,6 +53,10 @@ pub enum DataKey {
     UsageLimits(u32),
     /// Running usage state for a subscription within the current window.
     UsageState(u32),
+    /// Billing period snapshot keyed by (subscription_id, period_index).
+    BillingPeriodSnapshot(u32, u64),
+    /// Ordered list of period indices for a subscription (for listing).
+    BillingPeriodSnapshotIndex(u32),
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -551,6 +555,38 @@ pub struct BillingCompactionSummary {
     pub pruned_count: u32,
     pub kept_count: u32,
     pub total_pruned_amount: i128,
+}
+
+/// Snapshot closed — no further mutations allowed.
+pub const SNAPSHOT_FLAG_CLOSED: u32 = 1 << 0;
+/// An interval charge was processed in this period.
+pub const SNAPSHOT_FLAG_INTERVAL_CHARGED: u32 = 1 << 1;
+/// At least one usage charge was processed in this period.
+pub const SNAPSHOT_FLAG_USAGE_CHARGED: u32 = 1 << 2;
+/// Period closed with no successful charges.
+pub const SNAPSHOT_FLAG_EMPTY: u32 = 1 << 3;
+
+/// Immutable per-period summary written after each successful interval charge.
+///
+/// Keyed by `(subscription_id, period_index)` where `period_index = timestamp / interval_seconds`.
+/// Once `SNAPSHOT_FLAG_CLOSED` is set, the record cannot be overwritten.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BillingPeriodSnapshot {
+    pub subscription_id: u32,
+    pub period_index: u64,
+    /// Ledger timestamp of the start of this billing period.
+    pub period_start: u64,
+    /// Ledger timestamp of the end of this billing period (charge time).
+    pub period_end: u64,
+    /// Total amount charged (interval + any usage) in token base units.
+    pub total_charged: i128,
+    /// Total usage units debited in this period.
+    pub total_usage_units: i128,
+    /// Bitmask of SNAPSHOT_FLAG_* constants.
+    pub status_flags: u32,
+    /// Ledger timestamp when the snapshot was finalized.
+    pub finalized_at: u64,
 }
 
 /// Event emitted when statement compaction executes.
