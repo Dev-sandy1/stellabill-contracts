@@ -567,7 +567,7 @@ impl SubscriptionVault {
         let next_id: u32 = env
             .storage()
             .instance()
-            .get(&Symbol::new(&env, "next_id"))
+            .get(&DataKey::NextId)
             .unwrap_or(0);
         if start_id >= next_id {
             return Ok(Vec::new(&env));

@@ -13,61 +13,116 @@ pub const MAX_METADATA_KEY_LENGTH: u32 = 32;
 pub const MAX_METADATA_VALUE_LENGTH: u32 = 256;
 
 /// Storage keys for secondary indices.
+///
+/// ## Storage Layout — Discriminant Registry
+///
+/// The Soroban `#[contracttype]` macro serialises enum variants by their
+/// **declaration order** (0-indexed). The discriminant numbers in the doc
+/// comments below are the canonical, frozen identifiers for each key.
+/// **Never reorder or remove a variant** — doing so shifts all subsequent
+/// discriminants and silently corrupts live storage. Only append new variants
+/// at the end.
+///
+/// | Discriminant | Variant | Storage tier |
+/// |:---:|:---|:---|
+/// | 0 | `MerchantSubs(Address)` | instance |
+/// | 1 | `Token` | instance |
+/// | 2 | `Admin` | instance |
+/// | 3 | `MinTopup` | instance |
+/// | 4 | `NextId` | instance |
+/// | 5 | `SchemaVersion` | instance |
+/// | 6 | `Sub(u32)` | persistent |
+/// | 7 | `ChargedPeriod(u32)` | persistent |
+/// | 8 | `IdemKey(u32)` | persistent |
+/// | 9 | `EmergencyStop` | instance |
+/// | 10 | `MerchantPaused(Address)` | instance |
+/// | 11 | `BillingStatement(u32, u32)` | persistent |
+/// | 12 | `BillingStatementsBySubscription(u32)` | persistent |
+/// | 13 | `BillingStatementsByMerchant(Address)` | persistent |
+/// | 14 | `TotalAccounted(Address)` | instance |
+/// | 15 | `Recovery(String)` | persistent |
+/// | 16 | `MerchantConfig(Address)` | instance |
+/// | 17 | `MerchantEarnings(Address, Address)` | instance |
+/// | 18 | `MerchantTokens(Address)` | instance |
+/// | 19 | `UsageLimits(u32)` | instance |
+/// | 20 | `UsageState(u32)` | instance |
+/// | 21 | `GracePeriod` | instance |
+/// | 22 | `FeeBps` | instance |
+/// | 23 | `Treasury` | instance |
+/// | 24 | `AcceptedTokens` | instance |
+/// | 25 | `TokenDecimals(Address)` | instance |
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     /// Maps a merchant address to its list of subscription IDs. Discriminant 0.
-    MerchantSubs(Address) = 0,
+    MerchantSubs(Address),
     /// USDC token contract address. Discriminant 1.
-    Token = 1,
+    Token,
     /// Authorized admin address. Discriminant 2.
-    Admin = 2,
+    Admin,
     /// Minimum deposit threshold. Discriminant 3.
-    MinTopup = 3,
+    MinTopup,
     /// Auto-incrementing subscription ID counter. Discriminant 4.
-    NextId = 4,
+    NextId,
     /// On-chain storage schema version. Discriminant 5.
-    SchemaVersion = 5,
+    SchemaVersion,
     /// Subscription record keyed by its ID. Discriminant 6.
-    Sub(u32) = 6,
+    Sub(u32),
     /// Last charged billing-period index for replay protection. Discriminant 7.
-    ChargedPeriod(u32) = 7,
+    ChargedPeriod(u32),
     /// Idempotency key stored per subscription. Discriminant 8.
-    IdemKey(u32) = 8,
+    IdemKey(u32),
     /// Emergency stop flag - when true, critical operations are blocked. Discriminant 9.
-    EmergencyStop = 9,
+    EmergencyStop,
     /// Merchant-wide pause flag. Discriminant 10.
-    MerchantPaused(Address) = 10,
+    MerchantPaused(Address),
     /// Detailed billing statement for a subscription charge. Discriminant 11.
-    BillingStatement(u32, u32) = 11,
+    BillingStatement(u32, u32),
     /// Secondary index for statements by subscription. Discriminant 12.
-    BillingStatementsBySubscription(u32) = 12,
+    BillingStatementsBySubscription(u32),
     /// Secondary index for statements by merchant. Discriminant 13.
-    BillingStatementsByMerchant(Address) = 13,
+    BillingStatementsByMerchant(Address),
     /// Total accounted balance for recovery validation. Discriminant 14.
-    TotalAccounted(Address) = 14,
+    TotalAccounted(Address),
     /// Replay protection key for recovery operations. Discriminant 15.
-    Recovery(String) = 15,
+    Recovery(String),
     /// Merchant configuration (pause state, fee routing, etc.). Discriminant 16.
-    MerchantConfig(Address) = 16,
+    MerchantConfig(Address),
     /// Per-merchant, per-token accrued earnings record. Discriminant 17.
-    MerchantEarnings(Address, Address) = 17,
+    MerchantEarnings(Address, Address),
     /// List of token addresses a merchant has earned in. Discriminant 18.
-    MerchantTokens(Address) = 18,
+    MerchantTokens(Address),
     /// Usage rate/cap limits for a subscription. Discriminant 19.
-    UsageLimits(u32) = 19,
+    UsageLimits(u32),
     /// Running usage state for a subscription within the current window. Discriminant 20.
-    UsageState(u32) = 20,
+    UsageState(u32),
     /// Global grace period for underfunded subscriptions. Discriminant 21.
-    GracePeriod = 21,
+    GracePeriod,
     /// Protocol fee in basis points (0-10,000). Discriminant 22.
-    FeeBps = 22,
+    FeeBps,
     /// Treasury address for protocol fee collection. Discriminant 23.
-    Treasury = 23,
+    Treasury,
     /// List of all token addresses accepted by the vault. Discriminant 24.
-    AcceptedTokens = 24,
+    AcceptedTokens,
     /// Decimals for a specific accepted token. Discriminant 25.
-    TokenDecimals(Address) = 25,
+    TokenDecimals(Address),
+    /// Auto-incrementing plan-template ID counter. Discriminant 26.
+    NextPlanId,
+    /// Plan template record keyed by its plan ID. Discriminant 27.
+    Plan(u32),
+    /// Maps a subscription ID to its parent plan-template ID. Discriminant 28.
+    SubPlan(u32),
+    /// Max concurrent active subscriptions allowed for a plan. Discriminant 29.
+    PlanMaxActive(u32),
+    /// Per-subscriber, per-token credit limit. Discriminant 30.
+    CreditLimit(Address, Address),
+    /// Maps a token address to its list of subscription IDs. Discriminant 31.
+    TokenSubs(Address), // Test comment
+    /// Maps (merchant, token) to their accumulated balance. Discriminant 32.
+    MerchantBalance(Address, Address),
+    /// Maps a subscriber address to their blocklist status. Discriminant 33.
+    Blocklist(Address),
+    Oracle,
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -626,6 +681,7 @@ pub struct SubscriptionCreatedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
     pub merchant: Address,
+    pub token: Address,
     pub amount: i128,
     pub interval_seconds: u64,
     pub lifetime_cap: Option<i128>,
