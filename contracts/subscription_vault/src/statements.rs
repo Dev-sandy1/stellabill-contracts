@@ -107,10 +107,36 @@ pub fn append_statement(
         &next_statement_key(subscription_id),
         &(safe_add(next as i128, 1).unwrap_or(0) as u32),
     );
-    storage.set(
-        &live_statement_key(subscription_id),
-        &(safe_add(live as i128, 1).unwrap_or(0) as u32),
-    );
+    let mut new_live = safe_add(live as i128, 1).unwrap_or(0) as u32;
+    let keep_recent = get_retention_config(env).keep_recent;
+
+    if keep_recent < u32::MAX && new_live > keep_recent {
+        let oldest_seq = (next + 1).saturating_sub(new_live);
+        let key = statement_row_key(subscription_id, oldest_seq);
+        if let Some(row) = storage.get::<_, BillingStatement>(&key) {
+            let mut aggregate = get_compacted_aggregate(env, subscription_id);
+            aggregate.pruned_count = (safe_add(aggregate.pruned_count as i128, 1).unwrap_or(0)) as u32;
+            aggregate.total_amount = safe_add(aggregate.total_amount, row.amount).unwrap_or(aggregate.total_amount);
+            match row.kind {
+                BillingChargeKind::Interval => aggregate.totals.interval = safe_add(aggregate.totals.interval, row.amount).unwrap_or(aggregate.totals.interval),
+                BillingChargeKind::Usage => aggregate.totals.usage = safe_add(aggregate.totals.usage, row.amount).unwrap_or(aggregate.totals.usage),
+                BillingChargeKind::OneOff => aggregate.totals.one_off = safe_add(aggregate.totals.one_off, row.amount).unwrap_or(aggregate.totals.one_off),
+            }
+            aggregate.oldest_period_start = match aggregate.oldest_period_start {
+                Some(a) => Some(a.min(row.period_start)),
+                None => Some(row.period_start),
+            };
+            aggregate.newest_period_end = match aggregate.newest_period_end {
+                Some(a) => Some(a.max(row.period_end)),
+                None => Some(row.period_end),
+            };
+            storage.set(&aggregate_key(subscription_id), &aggregate);
+            storage.remove(&key);
+            new_live -= 1;
+        }
+    }
+    
+    storage.set(&live_statement_key(subscription_id), &new_live);
     Ok(())
 }
 
@@ -150,7 +176,7 @@ pub fn compact_subscription_statements(
     let mut oldest: Option<u64> = None;
     let mut newest: Option<u64> = None;
 
-    let mut seq = 0u32;
+    let mut seq = next.saturating_sub(live);
     let mut interval_amt = 0i128;
     let mut usage_amt = 0i128;
     let mut one_off_amt = 0i128;
@@ -264,7 +290,10 @@ pub fn get_statements_by_subscription_offset(
             }
         }
     } else {
-        let mut seq = 0u32;
+        let live: u32 = storage
+            .get(&live_statement_key(subscription_id))
+            .unwrap_or(0);
+        let mut seq = next.saturating_sub(live);
         while seq < next {
             if let Some(row) =
                 storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq))
@@ -325,8 +354,12 @@ pub fn get_statements_by_subscription_cursor(
         });
     }
     let max_seq = next - 1;
-    let start = cursor.unwrap_or(if newest_first { max_seq } else { 0 });
-    if start > max_seq {
+    let live: u32 = storage
+        .get(&live_statement_key(subscription_id))
+        .unwrap_or(0);
+    let min_seq = next.saturating_sub(live);
+    let start = cursor.unwrap_or(if newest_first { max_seq } else { min_seq });
+    if start > max_seq || start < min_seq {
         return Ok(BillingStatementsPage {
             statements: Vec::new(env),
             next_cursor: None,
@@ -347,11 +380,11 @@ pub fn get_statements_by_subscription_cursor(
                 out.push_back(row);
                 taken += 1;
                 if taken >= limit {
-                    next_cursor = if seq > 0 { Some(seq - 1) } else { None };
+                    next_cursor = if seq > min_seq { Some(seq - 1) } else { None };
                     break;
                 }
             }
-            if seq == 0 {
+            if seq == min_seq {
                 break;
             }
             seq -= 1;
