@@ -116,6 +116,8 @@ mod test_usage_limits;
 mod test_deterministic_charging;
 #[cfg(test)]
 mod test_emergency_stop_lifetime_caps;
+#[cfg(test)]
+mod test_lifetime_caps;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
@@ -128,7 +130,8 @@ pub use types::{
     BillingChargeKind, BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig,
     BillingStatement, BillingStatementAggregate, BillingStatementsPage, CapInfo,
     ChargeExecutionResult, ContractSnapshot, DataKey, EmergencyStopDisabledEvent,
-    EmergencyStopEnabledEvent, Error, FundsDepositedEvent, LifetimeCapReachedEvent, MerchantConfig,
+    EmergencyStopEnabledEvent, Error, FundsDepositedEvent, GlobalCapDefaultUpdatedEvent,
+    LifetimeCapReachedEvent, LifetimeCapUpdatedEvent, MerchantCapDefaultUpdatedEvent, MerchantConfig,
     MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent,
     MetadataSetEvent, MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig,
     OraclePrice, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, ProtocolFeeChargedEvent,
@@ -1519,6 +1522,64 @@ impl SubscriptionVault {
     /// When no cap is configured all cap-related fields return `None` / `false`.
     pub fn get_cap_info(env: Env, subscription_id: u32) -> Result<CapInfo, Error> {
         queries::get_cap_info(&env, subscription_id)
+    }
+
+    /// Set or clear the contract-wide default lifetime cap applied to new subscriptions.
+    ///
+    /// When set, any `create_subscription` call that provides no explicit `lifetime_cap`
+    /// inherits this value (unless a per-merchant default takes precedence).
+    /// Pass `None` to remove the global default.
+    ///
+    /// # Auth
+    /// Admin only.
+    pub fn set_global_cap_default(
+        env: Env,
+        admin: Address,
+        cap: Option<i128>,
+    ) -> Result<(), Error> {
+        subscription::do_set_global_cap_default(&env, admin, cap)
+    }
+
+    /// Return the current contract-wide default lifetime cap, or `None` if unset.
+    pub fn get_global_cap_default(env: Env) -> Option<i128> {
+        subscription::get_global_cap_default(&env)
+    }
+
+    /// Set or clear a per-merchant default lifetime cap for all new subscriptions to this merchant.
+    ///
+    /// Overrides the global default for subscriptions created against `merchant`.
+    /// Pass `None` to fall back to the global default.
+    ///
+    /// # Auth
+    /// Merchant address must authorize.
+    pub fn set_merchant_cap_default(
+        env: Env,
+        merchant: Address,
+        cap: Option<i128>,
+    ) -> Result<(), Error> {
+        subscription::do_set_merchant_cap_default(&env, merchant, cap)
+    }
+
+    /// Return the per-merchant default lifetime cap, or `None` if unset.
+    pub fn get_merchant_cap_default(env: Env, merchant: Address) -> Option<i128> {
+        subscription::get_merchant_cap_default(&env, merchant)
+    }
+
+    /// Update the lifetime cap on an existing subscription.
+    ///
+    /// - Raising or removing the cap is always allowed.
+    /// - Lowering the cap below `lifetime_charged` is rejected with `LifetimeCapReached`.
+    /// - Setting to `None` removes the cap entirely.
+    ///
+    /// # Auth
+    /// Admin only.
+    pub fn update_subscription_cap(
+        env: Env,
+        admin: Address,
+        subscription_id: u32,
+        new_cap: Option<i128>,
+    ) -> Result<(), Error> {
+        subscription::do_update_subscription_cap(&env, admin, subscription_id, new_cap)
     }
 
     /// Return subscription billing statements using offset/limit pagination.

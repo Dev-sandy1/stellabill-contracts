@@ -1041,3 +1041,33 @@ pub struct TokenReconciliationSnapshot {
     /// Computed balance = total_accruals - withdrawals - refunds.
     pub computed_balance: i128,
 }
+
+/// Event emitted when admin updates a subscription's lifetime cap.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LifetimeCapUpdatedEvent {
+    pub subscription_id: u32,
+    pub old_cap: Option<i128>,
+    pub new_cap: Option<i128>,
+    pub timestamp: u64,
+}
+
+/// Event emitted when the contract-wide default lifetime cap is changed by admin.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GlobalCapDefaultUpdatedEvent {
+    pub admin: Address,
+    pub old_default: Option<i128>,
+    pub new_default: Option<i128>,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a merchant updates their per-merchant cap default.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantCapDefaultUpdatedEvent {
+    pub merchant: Address,
+    pub old_default: Option<i128>,
+    pub new_default: Option<i128>,
+    pub timestamp: u64,
+}
