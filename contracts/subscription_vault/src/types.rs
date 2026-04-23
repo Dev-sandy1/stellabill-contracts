@@ -3,7 +3,7 @@
 //! Kept in a separate module to reduce merge conflicts when editing state machine
 //! or contract entrypoints.
 
-use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
+use soroban_sdk::{ contracterror, contracttype, Address, String, Vec };
 
 /// Maximum number of metadata keys per subscription.
 pub const MAX_METADATA_KEYS: u32 = 10;
@@ -139,11 +139,7 @@ pub struct Subscription {
 
 impl Subscription {
     pub fn is_expired(&self, current_time: u64) -> bool {
-        if let Some(exp) = self.expires_at {
-            current_time >= exp
-        } else {
-            false
-        }
+        if let Some(exp) = self.expires_at { current_time >= exp } else { false }
     }
 }
 
@@ -924,36 +920,7 @@ pub struct PartialRefundEvent {
 pub struct MerchantConfig {
     pub fee_address: Option<Address>,
     pub redirect_url: String, // e.g., for off-chain success callbacks
-    pub is_paused: bool,      // Global pause for all merchant plans
-}
-
-/// Aggregated billing totals used in compaction and earnings records.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccruedTotals {
-    pub interval: i128,
-    pub usage: i128,
-    pub one_off: i128,
-}
-
-/// Per-token earnings record for a merchant.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenEarnings {
-    pub accruals: AccruedTotals,
-    pub withdrawals: i128,
-    pub refunds: i128,
-}
-
-/// Reconciliation snapshot for a single token bucket held by a merchant.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenReconciliationSnapshot {
-    pub token: Address,
-    pub total_accruals: i128,
-    pub total_withdrawals: i128,
-    pub total_refunds: i128,
-    pub computed_balance: i128,
+    pub is_paused: bool, // Global pause for all merchant plans
 }
 
 /// Event emitted when a merchant enables their blanket pause.
@@ -1001,43 +968,4 @@ pub struct ProtocolFeeConfiguredEvent {
     pub fee_bps: u32,
     pub treasury: Option<Address>,
     pub timestamp: u64,
-}
-
-/// Breakdown of a merchant's accrued earnings by charge kind.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccruedTotals {
-    /// Total earned from interval charges.
-    pub interval: i128,
-    /// Total earned from usage charges.
-    pub usage: i128,
-    /// Total earned from one-off charges.
-    pub one_off: i128,
-}
-
-/// Accumulated earnings for a merchant for a single token.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenEarnings {
-    /// Accrued charge totals broken down by kind.
-    pub accruals: AccruedTotals,
-    /// Total amount withdrawn by the merchant.
-    pub withdrawals: i128,
-    /// Total amount refunded to subscribers.
-    pub refunds: i128,
-}
-
-/// A reconciliation snapshot for one token, returned by `get_reconciliation_snapshot`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenReconciliationSnapshot {
-    pub token: Address,
-    /// Sum of all charges accrued (interval + usage + one_off).
-    pub total_accruals: i128,
-    /// Sum of all withdrawals.
-    pub total_withdrawals: i128,
-    /// Sum of all subscriber refunds.
-    pub total_refunds: i128,
-    /// Computed balance = total_accruals - withdrawals - refunds.
-    pub computed_balance: i128,
 }
