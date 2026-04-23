@@ -5,11 +5,16 @@
 #![allow(dead_code)]
 
 use crate::types::{
-    AcceptedToken, AdminRotatedEvent, BatchChargeResult, DataKey, Error, RecoveryEvent,
+    AcceptedToken,
+    AdminRotatedEvent,
+    BatchChargeResult,
+    DataKey,
+    Error,
+    RecoveryEvent,
     RecoveryReason,
 };
-use crate::{charge_core::charge_one, ChargeExecutionResult};
-use soroban_sdk::{token, Address, Env, String, Symbol, Vec};
+use crate::{ charge_core::charge_one, ChargeExecutionResult };
+use soroban_sdk::{ token, Address, Env, String, Symbol, Vec };
 
 fn accepted_tokens_key(env: &Env) -> Symbol {
     Symbol::new(env, "accepted_tokens")
@@ -25,7 +30,7 @@ pub fn do_init(
     token_decimals: u32,
     admin: Address,
     min_topup: i128,
-    grace_period: u64,
+    grace_period: u64
 ) -> Result<(), Error> {
     let instance = env.storage().instance();
     if instance.has(&Symbol::new(env, "token")) || instance.has(&Symbol::new(env, "admin")) {
@@ -46,16 +51,13 @@ pub fn do_init(
     instance.set(&DataKey::SchemaVersion, &1u32);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
-        (token, admin, min_topup, grace_period),
+        (token, admin, min_topup, grace_period)
     );
     Ok(())
 }
 
 pub fn require_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::NotInitialized)
+    env.storage().instance().get(&Symbol::new(env, "admin")).ok_or(Error::NotInitialized)
 }
 
 pub fn require_admin_auth(env: &Env, admin: &Address) -> Result<(), Error> {
@@ -75,62 +77,42 @@ pub fn require_stored_admin_auth(env: &Env) -> Result<Address, Error> {
 
 pub fn do_set_min_topup(env: &Env, admin: Address, min_topup: i128) -> Result<(), Error> {
     require_admin_auth(env, &admin)?;
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, "min_topup"), &min_topup);
-    env.events()
-        .publish((Symbol::new(env, "min_topup_updated"),), min_topup);
+    env.storage().instance().set(&Symbol::new(env, "min_topup"), &min_topup);
+    env.events().publish((Symbol::new(env, "min_topup_updated"),), min_topup);
     Ok(())
 }
 
 pub fn get_min_topup(env: &Env) -> Result<i128, Error> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "min_topup"))
-        .ok_or(Error::NotInitialized)
+    env.storage().instance().get(&Symbol::new(env, "min_topup")).ok_or(Error::NotInitialized)
 }
 
 pub fn do_set_grace_period(env: &Env, admin: Address, grace_period: u64) -> Result<(), Error> {
     require_admin_auth(env, &admin)?;
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, "grace_period"), &grace_period);
+    env.storage().instance().set(&Symbol::new(env, "grace_period"), &grace_period);
     Ok(())
 }
 
 pub fn get_grace_period(env: &Env) -> Result<u64, Error> {
-    Ok(env
-        .storage()
-        .instance()
-        .get(&Symbol::new(env, "grace_period"))
-        .unwrap_or(0))
+    Ok(env.storage().instance().get(&Symbol::new(env, "grace_period")).unwrap_or(0))
 }
 
 pub fn get_token(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "token"))
-        .ok_or(Error::NotFound)
+    env.storage().instance().get(&Symbol::new(env, "token")).ok_or(Error::NotFound)
 }
 
 pub fn get_token_decimals(env: &Env, token: &Address) -> Result<u32, Error> {
-    env.storage()
-        .instance()
-        .get(&accepted_token_decimals_key(env, token))
-        .ok_or(Error::NotFound)
+    env.storage().instance().get(&accepted_token_decimals_key(env, token)).ok_or(Error::NotFound)
 }
 
 pub fn is_token_accepted(env: &Env, token: &Address) -> bool {
-    env.storage()
-        .instance()
-        .has(&accepted_token_decimals_key(env, token))
+    env.storage().instance().has(&accepted_token_decimals_key(env, token))
 }
 
 pub fn add_accepted_token(
     env: &Env,
     admin: Address,
     token: Address,
-    decimals: u32,
+    decimals: u32
 ) -> Result<(), Error> {
     require_admin_auth(env, &admin)?;
 
@@ -157,9 +139,7 @@ pub fn remove_accepted_token(env: &Env, admin: Address, token: Address) -> Resul
     let storage = env.storage().instance();
     storage.remove(&accepted_token_decimals_key(env, &token));
 
-    let tokens: Vec<Address> = storage
-        .get(&accepted_tokens_key(env))
-        .unwrap_or(Vec::new(env));
+    let tokens: Vec<Address> = storage.get(&accepted_tokens_key(env)).unwrap_or(Vec::new(env));
     let mut next = Vec::new(env);
     for t in tokens.iter() {
         if t != token {
@@ -172,9 +152,7 @@ pub fn remove_accepted_token(env: &Env, admin: Address, token: Address) -> Resul
 
 pub fn list_accepted_tokens(env: &Env) -> Vec<AcceptedToken> {
     let storage = env.storage().instance();
-    let tokens: Vec<Address> = storage
-        .get(&accepted_tokens_key(env))
-        .unwrap_or(Vec::new(env));
+    let tokens: Vec<Address> = storage.get(&accepted_tokens_key(env)).unwrap_or(Vec::new(env));
     let mut out = Vec::new(env);
     for token in tokens.iter() {
         if let Some(decimals) = storage.get::<_, u32>(&accepted_token_decimals_key(env, &token)) {
@@ -186,7 +164,7 @@ pub fn list_accepted_tokens(env: &Env) -> Vec<AcceptedToken> {
 
 pub fn do_batch_charge(
     env: &Env,
-    subscription_ids: &Vec<u32>,
+    subscription_ids: &Vec<u32>
 ) -> Result<Vec<BatchChargeResult>, Error> {
     let _admin = require_stored_admin_auth(env)?;
 
@@ -195,18 +173,21 @@ pub fn do_batch_charge(
     for id in subscription_ids.iter() {
         let r = charge_one(env, id, now, None);
         let res = match &r {
-            Ok(ChargeExecutionResult::Charged) => BatchChargeResult {
-                success: true,
-                error_code: 0,
-            },
-            Ok(ChargeExecutionResult::InsufficientBalance) => BatchChargeResult {
-                success: false,
-                error_code: Error::InsufficientBalance.to_code(),
-            },
-            Err(e) => BatchChargeResult {
-                success: false,
-                error_code: e.to_code(),
-            },
+            Ok(ChargeExecutionResult::Charged) =>
+                BatchChargeResult {
+                    success: true,
+                    error_code: 0,
+                },
+            Ok(ChargeExecutionResult::InsufficientBalance) =>
+                BatchChargeResult {
+                    success: false,
+                    error_code: Error::InsufficientBalance.to_code(),
+                },
+            Err(e) =>
+                BatchChargeResult {
+                    success: false,
+                    error_code: e.to_code(),
+                },
         };
         results.push_back(res);
     }
@@ -214,10 +195,7 @@ pub fn do_batch_charge(
 }
 
 pub fn do_get_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::NotInitialized)
+    env.storage().instance().get(&Symbol::new(env, "admin")).ok_or(Error::NotInitialized)
 }
 
 pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) -> Result<(), Error> {
@@ -237,18 +215,13 @@ pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) ->
 
     // Atomic swap: write new admin before emitting the event so any indexer
     // that reads state on the event sees the already-updated value.
-    env.storage()
-        .instance()
-        .set(&Symbol::new(env, "admin"), &new_admin);
+    env.storage().instance().set(&Symbol::new(env, "admin"), &new_admin);
 
-    env.events().publish(
-        (Symbol::new(env, "admin_rotated"),),
-        AdminRotatedEvent {
-            old_admin: current_admin,
-            new_admin,
-            timestamp: env.ledger().timestamp(),
-        },
-    );
+    env.events().publish((Symbol::new(env, "admin_rotated"),), AdminRotatedEvent {
+        old_admin: current_admin,
+        new_admin,
+        timestamp: env.ledger().timestamp(),
+    });
 
     Ok(())
 }
@@ -260,7 +233,7 @@ pub fn do_recover_stranded_funds(
     recipient: Address,
     amount: i128,
     recovery_id: String,
-    reason: RecoveryReason,
+    reason: RecoveryReason
 ) -> Result<(), Error> {
     require_admin_auth(env, &admin)?;
 
@@ -278,7 +251,7 @@ pub fn do_recover_stranded_funds(
     let token_client = token::Client::new(env, &token);
     let contract_balance = token_client.balance(&env.current_contract_address());
     let accounted_balance = crate::accounting::get_total_accounted(env, &token);
-    
+
     let recoverable = contract_balance.checked_sub(accounted_balance).ok_or(Error::Underflow)?;
     if amount > recoverable {
         return Err(Error::InsufficientBalance);
@@ -296,10 +269,7 @@ pub fn do_recover_stranded_funds(
         timestamp: env.ledger().timestamp(),
     };
 
-    env.events().publish(
-        (Symbol::new(env, "recovery"), admin.clone()),
-        recovery_event,
-    );
+    env.events().publish((Symbol::new(env, "recovery"), admin.clone()), recovery_event);
 
     // Actual token transfer logic
     token_client.transfer(&env.current_contract_address(), &recipient, &amount);
@@ -316,7 +286,7 @@ pub fn set_protocol_fee(
     env: &Env,
     admin: Address,
     treasury: Address,
-    fee_bps: u32,
+    fee_bps: u32
 ) -> Result<(), crate::types::Error> {
     admin.require_auth();
     let stored = require_admin(env)?;
@@ -332,26 +302,20 @@ pub fn set_protocol_fee(
     env.events().publish(
         (Symbol::new(env, "protocol_fee_configured"),),
         crate::types::ProtocolFeeConfiguredEvent {
-            admin,
-            treasury,
             fee_bps,
+            treasury: Some(treasury),
             timestamp: env.ledger().timestamp(),
-        },
+        }
     );
     Ok(())
 }
 
 /// Return the configured protocol fee in basis points (0 = disabled).
 pub fn get_protocol_fee_bps(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "fee_bps"))
-        .unwrap_or(0u32)
+    env.storage().instance().get(&Symbol::new(env, "fee_bps")).unwrap_or(0u32)
 }
 
 /// Return the configured treasury address, or None if not set.
 pub fn get_treasury(env: &Env) -> Option<Address> {
-    env.storage()
-        .instance()
-        .get(&Symbol::new(env, "treasury"))
+    env.storage().instance().get(&Symbol::new(env, "treasury"))
 }
