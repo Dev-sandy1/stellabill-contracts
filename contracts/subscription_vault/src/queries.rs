@@ -38,6 +38,7 @@
 //! to estimate index size before paginating.
 
 use crate::safe_math::{safe_mul, safe_sub};
+use crate::subscription::next_charge_time;
 use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
@@ -176,10 +177,15 @@ pub fn get_subscriptions_by_token(
 }
 
 /// Computes the estimated next charge timestamp for a subscription.
+///
+/// Uses the same [`next_charge_time`] helper as the charge path so that the
+/// displayed "next charge" timestamp is always identical to the boundary that
+/// `charge_subscription` enforces.  On the (unreachable in practice) overflow
+/// path the timestamp is clamped to `u64::MAX` rather than panicking.
 pub fn compute_next_charge_info(subscription: &Subscription) -> NextChargeInfo {
-    let next_charge_timestamp = subscription
-        .last_payment_timestamp
-        .saturating_add(subscription.interval_seconds);
+    let next_charge_timestamp =
+        next_charge_time(subscription.last_payment_timestamp, subscription.interval_seconds)
+            .unwrap_or(u64::MAX);
 
     let is_charge_expected = match subscription.status {
         SubscriptionStatus::Active => true,

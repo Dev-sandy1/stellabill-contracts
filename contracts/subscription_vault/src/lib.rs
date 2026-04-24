@@ -119,6 +119,8 @@ mod test_emergency_stop_lifetime_caps;
 mod test_billing_statements;
 #[cfg(test)]
 mod test_migration_fixtures;
+#[cfg(test)]
+mod test_billing_interval_validation;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 

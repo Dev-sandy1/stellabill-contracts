@@ -53,6 +53,47 @@ use crate::types::{
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
 const MIN_SUBSCRIPTION_INTERVAL_SECONDS: u64 = 60;
+/// Hard upper bound on billing interval: 365 days (31 536 000 s).
+///
+/// Prevents absurdly large intervals from making `last_payment_timestamp +
+/// interval_seconds` overflow `u64` in practice, and keeps subscriptions
+/// semantically reasonable.
+pub const MAX_SUBSCRIPTION_INTERVAL_SECONDS: u64 = 31_536_000;
+
+/// Validates that `interval_seconds` is within the allowed `[MIN, MAX]` range.
+///
+/// Returns `Err(Error::InvalidInput)` when the value is below the minimum (60 s)
+/// or above the maximum (365 days).  Zero is implicitly rejected because
+/// `MIN_SUBSCRIPTION_INTERVAL_SECONDS` is non-zero.
+///
+/// This is the single authoritative validation gate: every code path that
+/// persists an interval (subscription creation, plan-template creation) must
+/// call this function rather than performing ad-hoc comparisons.
+pub fn validate_interval(interval_seconds: u64) -> Result<(), Error> {
+    if interval_seconds < MIN_SUBSCRIPTION_INTERVAL_SECONDS
+        || interval_seconds > MAX_SUBSCRIPTION_INTERVAL_SECONDS
+    {
+        return Err(Error::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Returns the earliest timestamp at which the *next* charge is allowed.
+///
+/// `next_charge_time(last, interval) == last + interval`
+///
+/// This is the canonical time-math helper.  Both the charge path
+/// (`charge_core.rs`) and the query path (`queries.rs`) must use this
+/// function instead of computing `last + interval` inline, so that the
+/// semantics are identical across all call sites.
+///
+/// Returns `Err(Error::Overflow)` if the addition would wrap past `u64::MAX`.
+/// In practice this cannot happen for validated intervals (≤ 365 days) and
+/// real ledger timestamps, but the checked arithmetic is retained as a
+/// belt-and-suspenders guard.
+pub fn next_charge_time(last_payment: u64, interval: u64) -> Result<u64, Error> {
+    last_payment.checked_add(interval).ok_or(Error::Overflow)
+}
 
 /// Hard upper bound on the number of subscription IDs that may be scanned in a
 /// single write-path helper invocation.
@@ -327,9 +368,7 @@ pub fn do_create_subscription_with_token(
         return Err(Error::InvalidAmount);
     }
 
-    if interval_seconds < MIN_SUBSCRIPTION_INTERVAL_SECONDS {
-        return Err(Error::InvalidInput);
-    }
+    validate_interval(interval_seconds)?;
 
     if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
@@ -925,6 +964,8 @@ pub fn do_create_plan_template(
 ) -> Result<u32, Error> {
     merchant.require_auth();
 
+    validate_interval(interval_seconds)?;
+
     // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
         if cap <= 0 {
@@ -961,6 +1002,7 @@ pub fn do_create_plan_template_with_token(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     merchant.require_auth();
+    validate_interval(interval_seconds)?;
     if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
     }
@@ -1067,6 +1109,8 @@ pub fn do_update_plan_template(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     merchant.require_auth();
+
+    validate_interval(interval_seconds)?;
 
     // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
