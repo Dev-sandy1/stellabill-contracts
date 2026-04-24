@@ -35,9 +35,9 @@ use crate::safe_math::{safe_add, safe_sub, safe_sub_balance};
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, ChargeExecutionResult, DataKey, Error,
-    LifetimeCapReachedEvent, Subscription, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
-    SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
+    BillingChargeKind, ChargeExecutionResult, DataKey, Error, LifetimeCapReachedEvent,
+    SubscriptionChargeFailedEvent, SubscriptionChargedEvent, SubscriptionStatus, UsageLimits,
+    UsageState, UsageStatementEvent,
 };
 use soroban_sdk::{symbol_short, Env, String, Symbol};
 
@@ -60,7 +60,7 @@ pub fn charge_one(
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
 ) -> Result<ChargeExecutionResult, Error> {
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     // Expiration guard
     if sub.is_expired(now) {
         if sub.status != SubscriptionStatus::Expired {
@@ -78,7 +78,7 @@ pub fn charge_one(
         return Err(Error::SubscriptionExpired);
     }
 
-    let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
+    let charge_amount = crate::oracle::resolve_charge_amount(env, subscription_id, &sub)?;
 
     if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
         return Err(Error::NotActive);

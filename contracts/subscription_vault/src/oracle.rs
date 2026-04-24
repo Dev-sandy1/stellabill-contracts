@@ -37,6 +37,17 @@ pub fn set_oracle_config(
             storage.remove(&Symbol::new(env, KEY_ORACLE_ADDR));
         }
         storage.set(&Symbol::new(env, KEY_ORACLE_MAX_AGE), &max_age_seconds);
+
+        env.events().publish(
+            (Symbol::new(env, "oracle_config_updated"),),
+            crate::types::OracleConfigUpdatedEvent {
+                enabled,
+                oracle: oracle.clone(),
+                max_age_seconds,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
         Ok(())
     }
 }
@@ -73,7 +84,11 @@ pub fn get_oracle_config(env: &Env) -> OracleConfig {
 /// to token base units using oracle quote:
 ///
 /// token_amount = ceil(quote_amount * 10^token_decimals / quote_per_token)
-pub fn resolve_charge_amount(env: &Env, subscription: &Subscription) -> Result<i128, Error> {
+pub fn resolve_charge_amount(
+    env: &Env,
+    subscription_id: u32,
+    subscription: &Subscription,
+) -> Result<i128, Error> {
     #[cfg(not(feature = "oracle-pricing"))]
     {
         let _ = env;
@@ -114,6 +129,19 @@ pub fn resolve_charge_amount(env: &Env, subscription: &Subscription) -> Result<i
         if token_amount <= 0 {
             return Err(Error::OraclePriceInvalid);
         }
+
+        env.events().publish(
+            (Symbol::new(env, "oracle_charge_resolved"), subscription_id),
+            crate::types::OracleChargeResolvedEvent {
+                subscription_id,
+                quote_amount: subscription.amount,
+                token_amount,
+                price: price.price,
+                price_timestamp: price.timestamp,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
         Ok(token_amount)
     }
 }

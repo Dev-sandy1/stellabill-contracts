@@ -42,13 +42,10 @@ use crate::safe_math::{safe_add, safe_add_balance, safe_sub, validate_non_negati
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent,
-    LifetimeCapReachedEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    SubscriberWithdrawalEvent,
-    Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
-    SubscriptionRecoveryReadyEvent,
-    SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus,
-    UsageLimits, UsageState,
+    BillingChargeKind, DataKey, Error, FundsDepositedEvent, LifetimeCapReachedEvent,
+    PartialRefundEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
+    SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
+    SubscriptionRecoveryReadyEvent, SubscriptionStatus, UsageLimits,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -428,7 +425,7 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     let now = env.ledger().timestamp();
     // Expiration guard
     if sub.is_expired(now) {
@@ -658,7 +655,7 @@ pub fn do_charge_one_off(
     merchant.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     let now = env.ledger().timestamp();
     // Expiration guard
     if sub.is_expired(now) {
@@ -767,14 +764,17 @@ pub fn do_cleanup_subscription(
     // Can only cleanup if it's already expired or cancelled
     let now = env.ledger().timestamp();
     let is_terminal = sub.status == SubscriptionStatus::Cancelled || sub.is_expired(now);
-    
+
     if !is_terminal {
         return Err(Error::NotActive); // Or some other error, meaning it's not terminal
     }
 
     if sub.status != SubscriptionStatus::Archived {
         // If it's expired but not yet marked as Expired or Cancelled, transition it to Expired first
-        if sub.status != SubscriptionStatus::Cancelled && sub.status != SubscriptionStatus::Expired && sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Cancelled
+            && sub.status != SubscriptionStatus::Expired
+            && sub.is_expired(now)
+        {
             validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
             sub.status = SubscriptionStatus::Expired;
         }
@@ -782,7 +782,7 @@ pub fn do_cleanup_subscription(
         validate_status_transition(&sub.status, &SubscriptionStatus::Archived)?;
         sub.status = SubscriptionStatus::Archived;
         env.storage().instance().set(&subscription_id, &sub);
-        
+
         env.events().publish(
             (Symbol::new(env, "subscription_archived"), subscription_id),
             crate::types::SubscriptionArchivedEvent {
@@ -826,8 +826,7 @@ pub fn do_withdraw_subscriber_funds(
         return Err(Error::InvalidAmount);
     }
 
-    let token_addr = sub.token.clone();
-
+    // let token_addr = sub.token.clone();
     // EFFECTS: zero the balance before the external token transfer (CEI pattern).
     sub.prepaid_balance = 0;
     let token_addr = sub.token.clone();
