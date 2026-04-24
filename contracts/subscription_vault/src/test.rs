@@ -1202,12 +1202,12 @@ fn test_deposit_funds_event_payload() {
         id
     );
 
-    // Verify event data: FundsDepositedEvent { subscription_id, subscriber, amount, prepaid_balance }
+    // Verify event data: FundsDepositedEvent { subscription_id, subscriber, amount, new_balance }
     let event_data: crate::FundsDepositedEvent = deposit_event.2.into_val(&env);
     assert_eq!(event_data.subscription_id, id);
     assert_eq!(event_data.subscriber, subscriber);
     assert_eq!(event_data.amount, 15_000_000);
-    assert_eq!(event_data.prepaid_balance, 15_000_000);
+    assert_eq!(event_data.new_balance, 15_000_000);
 }
 
 #[test]
@@ -3343,6 +3343,7 @@ fn test_withdraw_merchant_funds_reduces_default_bucket_and_emits_event() {
         token: token.clone(),
         amount: 4_000_000i128,
         remaining_balance: 5_000_000i128,
+        timestamp: env.ledger().timestamp(),
     }
     .into_val(&env);
     let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();
@@ -3423,6 +3424,7 @@ fn test_withdraw_merchant_token_funds_only_debits_requested_bucket_and_emits_eve
         token: token_b.clone(),
         amount: 2_000_000i128,
         remaining_balance: 5_000_000i128,
+        timestamp: env.ledger().timestamp(),
     }
     .into_val(&env);
     let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();

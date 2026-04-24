@@ -37,11 +37,10 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent,
-    LifetimeCapReachedEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    SubscriberWithdrawalEvent,
-    Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
-    SubscriptionRecoveryReadyEvent,
-    SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus,
+    LifetimeCapReachedEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateCreatedEvent,
+    PlanTemplateUpdatedEvent, SubscriberWithdrawalEvent,
+    Subscription, SubscriptionCancelledEvent, SubscriptionCreatedEvent, SubscriptionMigratedEvent,
+    SubscriptionRecoveryReadyEvent, SubscriptionStatus,
     UsageLimits, UsageState,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
@@ -381,7 +380,7 @@ pub fn do_create_subscription_with_token(
     env.storage().instance().set(&merchant_key, &ids);
 
     // Maintain token -> subscription-ID index
-    let token_key = (Symbol::new(env, "token_subs"), token);
+    let token_key = (Symbol::new(env, "token_subs"), token.clone());
     let mut token_ids: Vec<u32> = env
         .storage()
         .instance()
@@ -392,14 +391,17 @@ pub fn do_create_subscription_with_token(
 
     env.events().publish(
         (symbol_short!("created"), id),
-        (
-            subscriber.clone(),
-            merchant.clone(),
+        SubscriptionCreatedEvent {
+            subscription_id: id,
+            subscriber: subscriber.clone(),
+            merchant: merchant.clone(),
+            token: token.clone(),
             amount,
             interval_seconds,
             lifetime_cap,
             expires_at,
-        ),
+            timestamp: env.ledger().timestamp(),
+        },
     );
 
     Ok(id)
@@ -460,9 +462,11 @@ pub fn do_deposit_funds(
         (Symbol::new(env, "deposited"), subscription_id),
         FundsDepositedEvent {
             subscription_id,
-            subscriber,
+            subscriber: subscriber.clone(),
+            token: token_addr.clone(),
             amount,
-            prepaid_balance: sub.prepaid_balance,
+            new_balance: sub.prepaid_balance,
+            timestamp: env.ledger().timestamp(),
         },
     );
 
@@ -488,7 +492,10 @@ pub fn do_deposit_funds(
             (Symbol::new(env, "sub_resumed"), subscription_id),
             crate::types::SubscriptionResumedEvent {
                 subscription_id,
+                subscriber: sub.subscriber.clone(),
+                merchant: sub.merchant.clone(),
                 authorizer: sub.subscriber.clone(),
+                timestamp: env.ledger().timestamp(),
             },
         );
     }
@@ -523,8 +530,12 @@ pub fn do_cancel_subscription(
         (Symbol::new(env, "subscription_cancelled"), subscription_id),
         SubscriptionCancelledEvent {
             subscription_id,
+            subscriber: sub.subscriber.clone(),
+            merchant: sub.merchant.clone(),
+            token: sub.token.clone(),
             authorizer,
             refund_amount,
+            timestamp: env.ledger().timestamp(),
         },
     );
     Ok(())
@@ -574,7 +585,10 @@ pub fn do_pause_subscription(
         (Symbol::new(env, "sub_paused"), subscription_id),
         crate::types::SubscriptionPausedEvent {
             subscription_id,
+            subscriber: sub.subscriber.clone(),
+            merchant: sub.merchant.clone(),
             authorizer,
+            timestamp: env.ledger().timestamp(),
         },
     );
 
@@ -633,7 +647,10 @@ pub fn do_resume_subscription(
         (Symbol::new(env, "sub_resumed"), subscription_id),
         crate::types::SubscriptionResumedEvent {
             subscription_id,
+            subscriber: sub.subscriber.clone(),
+            merchant: sub.merchant.clone(),
             authorizer,
+            timestamp: env.ledger().timestamp(),
         },
     );
 
@@ -727,8 +744,12 @@ pub fn do_charge_one_off(
         (Symbol::new(env, "oneoff_ch"), subscription_id),
         crate::types::OneOffChargedEvent {
             subscription_id,
+            subscriber: sub.subscriber.clone(),
             merchant: sub.merchant.clone(),
+            token: sub.token.clone(),
             amount,
+            remaining_balance: sub.prepaid_balance,
+            timestamp: now,
         },
     );
 
@@ -841,7 +862,9 @@ pub fn do_withdraw_subscriber_funds(
         SubscriberWithdrawalEvent {
             subscription_id,
             subscriber,
+            token: token_addr,
             amount: amount_to_refund,
+            timestamp: env.ledger().timestamp(),
         },
     );
 
@@ -901,6 +924,7 @@ pub fn do_partial_refund(
         PartialRefundEvent {
             subscription_id,
             subscriber,
+            token: sub.token.clone(),
             amount,
             timestamp: env.ledger().timestamp(),
         },
@@ -929,8 +953,8 @@ pub fn do_create_plan_template(
     let token = crate::admin::get_token(env)?;
     let plan_id = next_plan_id(env);
     let plan = PlanTemplate {
-        merchant,
-        token,
+        merchant: merchant.clone(),
+        token: token.clone(),
         amount,
         interval_seconds,
         usage_enabled,
@@ -941,6 +965,20 @@ pub fn do_create_plan_template(
 
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
+
+    env.events().publish(
+        (Symbol::new(env, "plan_created"), plan_id),
+        crate::types::PlanTemplateCreatedEvent {
+            plan_template_id: plan_id,
+            merchant,
+            token,
+            amount,
+            interval_seconds,
+            usage_enabled,
+            lifetime_cap,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
 
     Ok(plan_id)
 }
@@ -966,8 +1004,8 @@ pub fn do_create_plan_template_with_token(
 
     let plan_id = next_plan_id(env);
     let plan = PlanTemplate {
-        merchant,
-        token,
+        merchant: merchant.clone(),
+        token: token.clone(),
         amount,
         interval_seconds,
         usage_enabled,
@@ -978,6 +1016,21 @@ pub fn do_create_plan_template_with_token(
 
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
+
+    env.events().publish(
+        (Symbol::new(env, "plan_created"), plan_id),
+        crate::types::PlanTemplateCreatedEvent {
+            plan_template_id: plan_id,
+            merchant,
+            token,
+            amount,
+            interval_seconds,
+            usage_enabled,
+            lifetime_cap,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
     Ok(plan_id)
 }
 
@@ -1039,7 +1092,7 @@ pub fn do_create_subscription_from_plan(
     env.storage().instance().set(&merchant_key, &ids);
 
     // Maintain token -> subscription-ID index
-    let token_key = (Symbol::new(env, "token_subs"), plan.token);
+    let token_key = (Symbol::new(env, "token_subs"), plan.token.clone());
     let mut token_ids: Vec<u32> = env
         .storage()
         .instance()
@@ -1047,6 +1100,21 @@ pub fn do_create_subscription_from_plan(
         .unwrap_or(Vec::new(env));
     token_ids.push_back(id);
     env.storage().instance().set(&token_key, &token_ids);
+
+    env.events().publish(
+        (symbol_short!("created"), id),
+        SubscriptionCreatedEvent {
+            subscription_id: id,
+            subscriber: subscriber.clone(),
+            merchant: plan.merchant.clone(),
+            token: plan.token.clone(),
+            amount: plan.amount,
+            interval_seconds: plan.interval_seconds,
+            lifetime_cap: plan.lifetime_cap,
+            expires_at: None,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
 
     Ok(id)
 }

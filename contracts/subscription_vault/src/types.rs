@@ -658,10 +658,13 @@ pub struct SubscriptionCreatedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
     pub merchant: Address,
+    /// Settlement token used for all charges on this subscription.
+    pub token: Address,
     pub amount: i128,
     pub interval_seconds: u64,
     pub lifetime_cap: Option<i128>,
     pub expires_at: Option<u64>,
+    pub timestamp: u64,
 }
 
 /// Event emitted when funds are deposited into a subscription vault.
@@ -670,8 +673,12 @@ pub struct SubscriptionCreatedEvent {
 pub struct FundsDepositedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
+    /// Settlement token deposited.
+    pub token: Address,
     pub amount: i128,
-    pub prepaid_balance: i128,
+    /// Total prepaid balance after this deposit.
+    pub new_balance: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscription interval charge succeeds.
@@ -679,9 +686,17 @@ pub struct FundsDepositedEvent {
 #[derive(Clone, Debug)]
 pub struct SubscriptionChargedEvent {
     pub subscription_id: u32,
+    pub subscriber: Address,
     pub merchant: Address,
+    /// Settlement token charged.
+    pub token: Address,
+    /// Amount charged in this interval (gross amount before fees).
     pub amount: i128,
+    /// Cumulative total charged over subscription lifetime.
     pub lifetime_charged: i128,
+    /// Prepaid balance remaining after this charge.
+    pub remaining_balance: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when an interval charge attempt cannot be completed due to
@@ -715,8 +730,13 @@ pub struct SubscriptionRecoveryReadyEvent {
 #[derive(Clone, Debug)]
 pub struct SubscriptionCancelledEvent {
     pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
+    pub token: Address,
     pub authorizer: Address,
+    /// Remaining prepaid balance available for subscriber withdrawal.
     pub refund_amount: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscription is paused.
@@ -724,7 +744,10 @@ pub struct SubscriptionCancelledEvent {
 #[derive(Clone, Debug)]
 pub struct SubscriptionPausedEvent {
     pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
     pub authorizer: Address,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscription is resumed.
@@ -732,7 +755,10 @@ pub struct SubscriptionPausedEvent {
 #[derive(Clone, Debug)]
 pub struct SubscriptionResumedEvent {
     pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
     pub authorizer: Address,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscription is automatically expired.
@@ -758,7 +784,9 @@ pub struct MerchantWithdrawalEvent {
     pub merchant: Address,
     pub token: Address,
     pub amount: i128,
+    /// Merchant's accumulated balance remaining after withdrawal.
     pub remaining_balance: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscriber withdraws funds after cancellation.
@@ -767,7 +795,9 @@ pub struct MerchantWithdrawalEvent {
 pub struct SubscriberWithdrawalEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
+    pub token: Address,
     pub amount: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a merchant-initiated one-off charge is applied.
@@ -775,8 +805,13 @@ pub struct SubscriberWithdrawalEvent {
 #[derive(Clone, Debug)]
 pub struct OneOffChargedEvent {
     pub subscription_id: u32,
+    pub subscriber: Address,
     pub merchant: Address,
+    pub token: Address,
     pub amount: i128,
+    /// Prepaid balance remaining after this charge.
+    pub remaining_balance: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when the lifetime charge cap is reached.
@@ -913,9 +948,48 @@ pub struct PartialRefundEvent {
     pub subscription_id: u32,
     /// Subscriber who receives the refunded amount.
     pub subscriber: Address,
+    pub token: Address,
     /// Amount refunded in token base units.
     pub amount: i128,
     /// Ledger timestamp when the refund was processed.
+    pub timestamp: u64,
+}
+
+/// Event emitted when a protocol fee is charged on a subscription interval.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeChargedEvent {
+    pub subscription_id: u32,
+    pub treasury: Address,
+    /// Fee amount routed to treasury.
+    pub fee_amount: i128,
+    /// Net amount credited to merchant after fee deduction.
+    pub merchant_amount: i128,
+    pub timestamp: u64,
+}
+
+/// Event emitted when the protocol fee configuration is updated.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeConfiguredEvent {
+    pub admin: Address,
+    pub treasury: Address,
+    /// Fee in basis points (0–10 000).
+    pub fee_bps: u32,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a plan template is created.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PlanTemplateCreatedEvent {
+    pub plan_template_id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub interval_seconds: u64,
+    pub usage_enabled: bool,
+    pub lifetime_cap: Option<i128>,
     pub timestamp: u64,
 }
 
@@ -925,35 +999,6 @@ pub struct MerchantConfig {
     pub fee_address: Option<Address>,
     pub redirect_url: String, // e.g., for off-chain success callbacks
     pub is_paused: bool,      // Global pause for all merchant plans
-}
-
-/// Aggregated billing totals used in compaction and earnings records.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccruedTotals {
-    pub interval: i128,
-    pub usage: i128,
-    pub one_off: i128,
-}
-
-/// Per-token earnings record for a merchant.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenEarnings {
-    pub accruals: AccruedTotals,
-    pub withdrawals: i128,
-    pub refunds: i128,
-}
-
-/// Reconciliation snapshot for a single token bucket held by a merchant.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenReconciliationSnapshot {
-    pub token: Address,
-    pub total_accruals: i128,
-    pub total_withdrawals: i128,
-    pub total_refunds: i128,
-    pub computed_balance: i128,
 }
 
 /// Event emitted when a merchant enables their blanket pause.
@@ -971,6 +1016,8 @@ pub struct MerchantUnpausedEvent {
     pub merchant: Address,
     pub timestamp: u64,
 }
+
+/// Event emitted when a merchant issues a refund to a subscriber.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MerchantRefundEvent {
@@ -978,43 +1025,5 @@ pub struct MerchantRefundEvent {
     pub subscriber: Address,
     pub token: Address,
     pub amount: i128,
-}
-
-/// Breakdown of a merchant's accrued earnings by charge kind.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccruedTotals {
-    /// Total earned from interval charges.
-    pub interval: i128,
-    /// Total earned from usage charges.
-    pub usage: i128,
-    /// Total earned from one-off charges.
-    pub one_off: i128,
-}
-
-/// Accumulated earnings for a merchant for a single token.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenEarnings {
-    /// Accrued charge totals broken down by kind.
-    pub accruals: AccruedTotals,
-    /// Total amount withdrawn by the merchant.
-    pub withdrawals: i128,
-    /// Total amount refunded to subscribers.
-    pub refunds: i128,
-}
-
-/// A reconciliation snapshot for one token, returned by `get_reconciliation_snapshot`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TokenReconciliationSnapshot {
-    pub token: Address,
-    /// Sum of all charges accrued (interval + usage + one_off).
-    pub total_accruals: i128,
-    /// Sum of all withdrawals.
-    pub total_withdrawals: i128,
-    /// Sum of all subscriber refunds.
-    pub total_refunds: i128,
-    /// Computed balance = total_accruals - withdrawals - refunds.
-    pub computed_balance: i128,
+    pub timestamp: u64,
 }

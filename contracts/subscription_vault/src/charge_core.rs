@@ -212,9 +212,13 @@ pub fn charge_one(
                 (symbol_short!("charged"),),
                 SubscriptionChargedEvent {
                     subscription_id,
+                    subscriber: sub.subscriber.clone(),
                     merchant: sub.merchant.clone(),
+                    token: sub.token.clone(),
                     amount: charge_amount,
                     lifetime_charged: sub.lifetime_charged,
+                    remaining_balance: sub.prepaid_balance,
+                    timestamp: now,
                 },
             );
 

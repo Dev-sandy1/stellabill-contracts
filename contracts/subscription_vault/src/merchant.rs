@@ -299,8 +299,16 @@ pub fn withdraw_merchant_funds_for_token(
     // ──────────────────────────────────────────────────────────────────────────
     set_merchant_balance(env, &merchant, &token_addr, &new_balance);
     crate::accounting::sub_total_accounted(env, &token_addr, amount)?;
-    env.events()
-        .publish((Symbol::new(env, "withdrawn"), merchant.clone()), amount);
+    env.events().publish(
+        (Symbol::new(env, "withdrawn"), merchant.clone()),
+        crate::types::MerchantWithdrawalEvent {
+            merchant: merchant.clone(),
+            token: token_addr.clone(),
+            amount,
+            remaining_balance: new_balance,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
 
     // ──────────────────────────────────────────────────────────────────────────
     // INTERACTIONS: Only after internal state is consistent, call token contract
@@ -352,6 +360,7 @@ pub fn merchant_refund(
             subscriber: subscriber.clone(),
             token: token_addr.clone(),
             amount,
+            timestamp: env.ledger().timestamp(),
         },
     );
 
