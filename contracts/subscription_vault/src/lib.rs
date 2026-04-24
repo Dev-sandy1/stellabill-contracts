@@ -121,6 +121,8 @@ mod test_billing_statements;
 mod test_migration_fixtures;
 #[cfg(test)]
 mod test_billing_interval_validation;
+#[cfg(test)]
+mod test_query_performance;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 

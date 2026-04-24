@@ -3,12 +3,12 @@
 use crate::{
     queries::{MAX_SCAN_DEPTH, MAX_SUBSCRIPTION_LIST_PAGE},
     subscription::MAX_WRITE_PATH_SCAN_DEPTH,
-    types::{DataKey, Subscription, SubscriptionStatus},
-    SubscriptionVault, SubscriptionVaultClient, Error,
+    types::{Subscription, SubscriptionStatus},
+    SubscriptionVault, SubscriptionVaultClient,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, Symbol, Vec, String,
+    Address, Env, Symbol,
 };
 
 const T0: u64 = 1700000000;
@@ -18,7 +18,7 @@ fn setup() -> (Env, SubscriptionVaultClient<'static>, Address, Address) {
     env.mock_all_auths();
     env.ledger().set_timestamp(T0);
     // Needed to avoid gas limits when doing deep mock pagination in tests
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let contract_id = env.register(SubscriptionVault, ());
     let client = SubscriptionVaultClient::new(&env, &contract_id);
@@ -341,4 +341,293 @@ fn test_write_path_scan_depth_guard_triggers_for_large_contracts() {
     // This creation should fail with InvalidInput because we simulated an oversized contract
     // AND we forced the scan path by configuring a credit limit.
     client.create_subscription(&subscriber, &merchant, &100, &(30 * 24 * 60 * 60), &false, &None, &None::<u64>);
+}
+
+// ── Deterministic ordering ────────────────────────────────────────────────────
+
+#[test]
+fn test_subscriber_list_results_are_ascending() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    inject_subscriptions(&env, &client.address, 20, &subscriber, &token);
+
+    let page = client.list_subscriptions_by_subscriber(&subscriber, &0, &20);
+    assert_eq!(page.subscription_ids.len(), 20);
+
+    // IDs must be in strictly ascending order.
+    let mut prev = page.subscription_ids.get(0).unwrap();
+    let mut i = 1u32;
+    while i < page.subscription_ids.len() {
+        let current = page.subscription_ids.get(i).unwrap();
+        assert!(current > prev, "IDs must be ascending: {} <= {}", current, prev);
+        prev = current;
+        i += 1;
+    }
+}
+
+#[test]
+fn test_merchant_query_results_are_stable_across_pages() {
+    let (env, client, token, _) = setup();
+    let merchant = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    for _ in 0..30 {
+        create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+    }
+
+    let total = client.get_merchant_subscription_count(&merchant);
+    assert_eq!(total, 30);
+
+    // Two consecutive pages must account for all subscriptions without gaps.
+    let page1 = client.get_subscriptions_by_merchant(&merchant, &0, &15);
+    let page2 = client.get_subscriptions_by_merchant(&merchant, &15, &15);
+    assert_eq!(page1.len(), 15);
+    assert_eq!(page2.len(), 15);
+    assert_eq!(page1.len() + page2.len(), total);
+
+    // A third page past the end must be empty.
+    let page3 = client.get_subscriptions_by_merchant(&merchant, &30, &15);
+    assert_eq!(page3.len(), 0);
+}
+
+// ── Multi-subscriber isolation ────────────────────────────────────────────────
+
+#[test]
+fn test_subscriber_isolation_no_cross_contamination() {
+    let (env, client, token, _) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    // Interleave: 5 alice, 5 bob, 5 alice.
+    inject_subscriptions(&env, &client.address, 5, &alice, &token);
+    inject_subscriptions(&env, &client.address, 5, &bob, &token);
+    inject_subscriptions(&env, &client.address, 5, &alice, &token);
+
+    let alice_page = client.list_subscriptions_by_subscriber(&alice, &0, &100);
+    let bob_page = client.list_subscriptions_by_subscriber(&bob, &0, &100);
+
+    assert_eq!(alice_page.subscription_ids.len(), 10);
+    assert_eq!(bob_page.subscription_ids.len(), 5);
+
+    // None of bob's IDs should appear in alice's result.
+    let mut a = 0u32;
+    while a < alice_page.subscription_ids.len() {
+        let alice_id = alice_page.subscription_ids.get(a).unwrap();
+        let mut b = 0u32;
+        while b < bob_page.subscription_ids.len() {
+            let bob_id = bob_page.subscription_ids.get(b).unwrap();
+            assert_ne!(alice_id, bob_id, "alice_id {} appeared in bob's result", alice_id);
+            b += 1;
+        }
+        a += 1;
+    }
+}
+
+// ── Exact-multiple-of-limit edge case ────────────────────────────────────────
+
+#[test]
+fn test_subscriber_list_exact_multiple_of_limit() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    // Exactly 3 pages of 10.
+    inject_subscriptions(&env, &client.address, 30, &subscriber, &token);
+
+    let page1 = client.list_subscriptions_by_subscriber(&subscriber, &0, &10);
+    assert_eq!(page1.subscription_ids.len(), 10);
+    // Should have a resume cursor since there are more IDs.
+    assert!(page1.next_start_id.is_some());
+
+    let page2 = client.list_subscriptions_by_subscriber(&subscriber, &page1.next_start_id.unwrap(), &10);
+    assert_eq!(page2.subscription_ids.len(), 10);
+    assert!(page2.next_start_id.is_some());
+
+    let page3 = client.list_subscriptions_by_subscriber(&subscriber, &page2.next_start_id.unwrap(), &10);
+    assert_eq!(page3.subscription_ids.len(), 10);
+    // Last page, no more IDs.
+    assert_eq!(page3.next_start_id, None);
+}
+
+// ── start_from_id beyond last subscription ────────────────────────────────────
+
+#[test]
+fn test_subscriber_list_start_beyond_range() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    inject_subscriptions(&env, &client.address, 5, &subscriber, &token);
+
+    // start_from_id well past the highest allocated ID.
+    let page = client.list_subscriptions_by_subscriber(&subscriber, &1000, &10);
+    assert_eq!(page.subscription_ids.len(), 0);
+    assert_eq!(page.next_start_id, None);
+}
+
+// ── Merchant: start offset exactly at end ────────────────────────────────────
+
+#[test]
+fn test_merchant_query_start_at_exact_end() {
+    let (env, client, token, _) = setup();
+    let merchant = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    for _ in 0..5 {
+        create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+    }
+
+    // Offset == count returns empty (not an error).
+    let page = client.get_subscriptions_by_merchant(&merchant, &5, &10);
+    assert_eq!(page.len(), 0);
+}
+
+// ── Billing statement pagination ──────────────────────────────────────────────
+
+/// Inject `count` billing statements for `sub_id` directly into contract storage,
+/// bypassing the charge path and any token/balance requirements.
+fn inject_statements(env: &Env, contract_id: &Address, sub_id: u32, count: u32, merchant: &Address) {
+    env.as_contract(contract_id, || {
+        let interval: u64 = 30 * 24 * 60 * 60;
+        for i in 0..count {
+            crate::statements::append_statement(
+                env,
+                sub_id,
+                10_000,
+                merchant.clone(),
+                crate::types::BillingChargeKind::Interval,
+                T0 + interval * i as u64,
+                T0 + interval * (i + 1) as u64,
+            ).unwrap();
+        }
+    });
+}
+
+#[test]
+fn test_statements_empty_subscription() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let sub_id = create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+
+    // Offset style: zero statements should return empty page.
+    let page = client.get_sub_statements_offset(&sub_id, &0, &10, &true);
+    assert_eq!(page.statements.len(), 0);
+    assert_eq!(page.next_cursor, None);
+    assert_eq!(page.total, 0);
+
+    // Cursor style: same.
+    let page2 = client.get_sub_statements_cursor(&sub_id, &None::<u32>, &10, &true);
+    assert_eq!(page2.statements.len(), 0);
+    assert_eq!(page2.next_cursor, None);
+    assert_eq!(page2.total, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1015)")] // InvalidInput = 1015
+fn test_statements_offset_limit_zero() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let sub_id = create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+    client.get_sub_statements_offset(&sub_id, &0, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1015)")] // InvalidInput = 1015
+fn test_statements_cursor_limit_zero() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let sub_id = create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+    client.get_sub_statements_cursor(&sub_id, &None::<u32>, &0, &true);
+}
+
+#[test]
+fn test_statements_offset_and_cursor_consistent() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let sub_id = create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+
+    // Inject 5 statements directly to avoid deposit/token setup.
+    inject_statements(&env, &client.address, sub_id, 5, &merchant);
+
+    let total_page = client.get_sub_statements_offset(&sub_id, &0, &100, &false);
+    assert_eq!(total_page.total, 5);
+    assert_eq!(total_page.statements.len(), 5);
+
+    // Paginate in groups of 2 and reconstruct.
+    let p1 = client.get_sub_statements_offset(&sub_id, &0, &2, &false);
+    assert_eq!(p1.statements.len(), 2);
+    assert!(p1.next_cursor.is_some());
+
+    let p2 = client.get_sub_statements_cursor(&sub_id, &p1.next_cursor, &2, &false);
+    assert_eq!(p2.statements.len(), 2);
+    assert!(p2.next_cursor.is_some());
+
+    let p3 = client.get_sub_statements_cursor(&sub_id, &p2.next_cursor, &2, &false);
+    assert_eq!(p3.statements.len(), 1);
+    assert_eq!(p3.next_cursor, None);
+
+    // Sequences must be monotonically increasing when oldest_first.
+    let mut prev_seq = p1.statements.get(0).unwrap().sequence;
+    let mut idx = 1u32;
+    while idx < p1.statements.len() {
+        let seq = p1.statements.get(idx).unwrap().sequence;
+        assert!(seq > prev_seq);
+        prev_seq = seq;
+        idx += 1;
+    }
+}
+
+#[test]
+fn test_statements_newest_first_reverses_order() {
+    let (env, client, token, _) = setup();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let sub_id = create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+
+    // Inject 4 statements directly to avoid deposit/token setup.
+    inject_statements(&env, &client.address, sub_id, 4, &merchant);
+
+    let oldest_first = client.get_sub_statements_offset(&sub_id, &0, &10, &false);
+    let newest_first = client.get_sub_statements_offset(&sub_id, &0, &10, &true);
+
+    assert_eq!(oldest_first.total, newest_first.total);
+    let n = oldest_first.statements.len();
+    assert!(n > 0);
+
+    // Sequences must be in reverse order when newest_first.
+    let mut i = 0u32;
+    while i < n {
+        let old_seq = oldest_first.statements.get(i).unwrap().sequence;
+        let new_seq = newest_first.statements.get(n - 1 - i).unwrap().sequence;
+        assert_eq!(old_seq, new_seq, "Sequence mismatch at index {}", i);
+        i += 1;
+    }
+}
+
+// ── Token query pagination ────────────────────────────────────────────────────
+
+#[test]
+fn test_token_query_start_past_end() {
+    let (env, client, token, _) = setup();
+    let merchant = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+
+    let page = client.get_subscriptions_by_token(&token, &5, &10);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn test_token_query_count_increments() {
+    let (env, client, token, _) = setup();
+    let merchant = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    assert_eq!(client.get_token_subscription_count(&token), 0);
+    for expected in 1u32..=5 {
+        create_sub_for_merchant_and_token(&client, &subscriber, &merchant, &token);
+        assert_eq!(client.get_token_subscription_count(&token), expected);
+    }
 }
