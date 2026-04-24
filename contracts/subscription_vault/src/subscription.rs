@@ -42,10 +42,9 @@ use crate::safe_math::{safe_add, safe_add_balance, safe_sub, validate_non_negati
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent,
-    LifetimeCapReachedEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    SubscriberWithdrawalEvent,
-    Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
+    BillingChargeKind, DataKey, Error, FundsDepositedEvent, LifetimeCapReachedEvent,
+    PartialRefundEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
+    SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
     SubscriptionRecoveryReadyEvent,
     SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus,
     UsageLimits, UsageState,
@@ -428,7 +427,7 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     let now = env.ledger().timestamp();
     // Expiration guard
     if sub.is_expired(now) {
@@ -658,7 +657,7 @@ pub fn do_charge_one_off(
     merchant.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     let now = env.ledger().timestamp();
     // Expiration guard
     if sub.is_expired(now) {
@@ -767,14 +766,17 @@ pub fn do_cleanup_subscription(
     // Can only cleanup if it's already expired or cancelled
     let now = env.ledger().timestamp();
     let is_terminal = sub.status == SubscriptionStatus::Cancelled || sub.is_expired(now);
-    
+
     if !is_terminal {
         return Err(Error::NotActive); // Or some other error, meaning it's not terminal
     }
 
     if sub.status != SubscriptionStatus::Archived {
         // If it's expired but not yet marked as Expired or Cancelled, transition it to Expired first
-        if sub.status != SubscriptionStatus::Cancelled && sub.status != SubscriptionStatus::Expired && sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Cancelled
+            && sub.status != SubscriptionStatus::Expired
+            && sub.is_expired(now)
+        {
             validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
             sub.status = SubscriptionStatus::Expired;
         }
@@ -782,7 +784,7 @@ pub fn do_cleanup_subscription(
         validate_status_transition(&sub.status, &SubscriptionStatus::Archived)?;
         sub.status = SubscriptionStatus::Archived;
         env.storage().instance().set(&subscription_id, &sub);
-        
+
         env.events().publish(
             (Symbol::new(env, "subscription_archived"), subscription_id),
             crate::types::SubscriptionArchivedEvent {
@@ -943,6 +945,7 @@ pub fn do_create_plan_template(
         lifetime_cap,
         template_key: plan_id,
         version: 1,
+        is_disabled: false,
     };
 
     let key = (Symbol::new(env, "plan"), plan_id);
@@ -980,6 +983,7 @@ pub fn do_create_plan_template_with_token(
         lifetime_cap,
         template_key: plan_id,
         version: 1,
+        is_disabled: false,
     };
 
     let key = (Symbol::new(env, "plan"), plan_id);
@@ -996,6 +1000,10 @@ pub fn do_create_subscription_from_plan(
     crate::blocklist::require_not_blocklisted(env, &subscriber)?;
 
     let plan = get_plan_template(env, plan_template_id)?;
+
+    if plan.is_disabled {
+        return Err(Error::InvalidInput);
+    }
 
     // Enforce subscriber-level credit limit for the plan's token.
     enforce_credit_limit_for_delta(env, &subscriber, &plan.token, plan.amount)?;
@@ -1100,6 +1108,7 @@ pub fn do_update_plan_template(
         lifetime_cap,
         template_key: existing.template_key,
         version: new_version,
+        is_disabled: false,
     };
 
     let key = (Symbol::new(env, "plan"), new_plan_id);
@@ -1121,6 +1130,38 @@ pub fn do_update_plan_template(
     );
 
     Ok(new_plan_id)
+}
+
+pub fn do_disable_plan_template(
+    env: &Env,
+    merchant: Address,
+    plan_template_id: u32,
+) -> Result<(), Error> {
+    merchant.require_auth();
+
+    let mut plan = get_plan_template(env, plan_template_id)?;
+    if plan.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+
+    if plan.is_disabled {
+        return Ok(());
+    }
+
+    plan.is_disabled = true;
+    let key = (Symbol::new(env, "plan"), plan_template_id);
+    env.storage().instance().set(&key, &plan);
+
+    env.events().publish(
+        (Symbol::new(env, "plan_disabled"), plan_template_id),
+        crate::types::PlanTemplateDisabledEvent {
+            plan_template_id,
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(())
 }
 
 pub fn do_migrate_subscription_to_plan(

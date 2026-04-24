@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use crate::{ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
+use crate::{
+    ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+};
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::{Address, Env, FromVal, String, Symbol, Val, Vec};
 
@@ -44,16 +46,12 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
         &INTERVAL,
         &true,
         &None::<i128>,
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &10_000_000i128);
 
-    let plan_id = client.create_plan_template(
-        &merchant,
-        &1_000_000i128,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
+    let plan_id =
+        client.create_plan_template(&merchant, &1_000_000i128, &INTERVAL, &false, &None::<i128>);
 
     client.enable_emergency_stop(&admin);
     assert!(client.get_emergency_stop_status());
@@ -65,7 +63,8 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
             &1_000_000i128,
             &INTERVAL,
             &false,
-            &None::<i128>
+            &None::<i128>,
+            &None
         ),
         Err(Ok(Error::EmergencyStopActive))
     );
@@ -77,7 +76,8 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
             &1_000_000i128,
             &INTERVAL,
             &false,
-            &None::<i128>
+            &None::<i128>,
+            &None
         ),
         Err(Ok(Error::EmergencyStopActive))
     );
@@ -119,7 +119,10 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
     assert!(!client.get_emergency_stop_status());
 
     let resumed_id = client.create_subscription_from_plan(&subscriber, &plan_id);
-    assert_eq!(client.get_subscription(&resumed_id).status, SubscriptionStatus::Active);
+    assert_eq!(
+        client.get_subscription(&resumed_id).status,
+        SubscriptionStatus::Active
+    );
 }
 
 #[test]
@@ -166,6 +169,7 @@ fn test_emergency_stop_blocks_batch_charge() {
         &INTERVAL,
         &false,
         &None::<i128>,
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &10_000_000i128);
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
@@ -189,6 +193,7 @@ fn test_batch_charge_resumes_normally_after_emergency_stop_disabled() {
         &INTERVAL,
         &false,
         &None::<i128>,
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &10_000_000i128);
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
@@ -218,6 +223,7 @@ fn test_lifetime_cap_interval_overrun_cancels_without_debiting_or_crediting() {
         &INTERVAL,
         &false,
         &Some(cap),
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &(3 * amount));
 
@@ -257,13 +263,10 @@ fn test_lifetime_cap_usage_exact_hit_charges_then_auto_cancels() {
         &INTERVAL,
         &true,
         &Some(cap),
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &DEPOSIT);
-    client.charge_usage_with_reference(
-        &sub_id,
-        &cap,
-        &String::from_str(&env, "cap-exact-usage"),
-    );
+    client.charge_usage_with_reference(&sub_id, &cap, &String::from_str(&env, "cap-exact-usage"));
 
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.prepaid_balance, DEPOSIT - cap);
@@ -287,6 +290,7 @@ fn test_lifetime_cap_usage_overrun_cancels_without_financial_side_effects() {
         &INTERVAL,
         &true,
         &Some(cap),
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &DEPOSIT);
 
@@ -325,6 +329,7 @@ fn test_lifetime_cap_oneoff_exact_hit_auto_cancels_and_emits_single_cap_event() 
         &INTERVAL,
         &false,
         &Some(cap),
+        &None,
     );
     client.deposit_funds(&sub_id, &subscriber, &20_000_000i128);
     client.charge_one_off(&sub_id, &merchant, &cap);
