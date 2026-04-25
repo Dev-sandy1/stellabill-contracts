@@ -34,6 +34,12 @@ pub fn do_init(
     if min_topup < 0 {
         return Err(Error::InvalidAmount);
     }
+    if token_decimals > 19 {
+        return Err(Error::InvalidTokenDecimals);
+    }
+    if token == env.current_contract_address() {
+        return Err(Error::InvalidToken);
+    }
 
     instance.set(&Symbol::new(env, "token"), &token);
     instance.set(&accepted_token_decimals_key(env, &token), &token_decimals);

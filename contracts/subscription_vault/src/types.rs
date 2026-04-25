@@ -274,6 +274,10 @@ pub enum Error {
     SelfRotation = 1036,
     /// The provided new admin address is invalid.
     InvalidNewAdmin = 1037,
+    /// The provided token address is invalid (e.g., zero address or contract address).
+    InvalidToken = 1038,
+    /// Token decimals exceed valid range.
+    InvalidTokenDecimals = 1039,
 }
 
 impl Error {
@@ -321,6 +325,8 @@ impl Error {
             Error::BurstLimitExceeded => 1035,
             Error::SelfRotation => 1036,
             Error::InvalidNewAdmin => 1037,
+            Error::InvalidToken => 1038,
+            Error::InvalidTokenDecimals => 1039,
         }
     }
 }
