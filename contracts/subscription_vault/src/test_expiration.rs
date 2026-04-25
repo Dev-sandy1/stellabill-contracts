@@ -53,7 +53,16 @@ fn test_expiration_timing_and_charging() {
     let min_topup = 1_000_000i128;
     token_admin.mint(&subscriber, &(min_topup * 5));
 
-    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &amount, &interval, &false, &None::<i128>, &Some(expires_at, &None));
+    let sub_id = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &token.address,
+        &amount,
+        &interval,
+        &false,
+        &None::<i128>,
+        &Some(expires_at),
+    );
 
     client.deposit_funds(&sub_id, &subscriber, &(min_topup * 5));
 
@@ -93,7 +102,16 @@ fn test_cleanup_and_archival() {
     let min_topup = 1_000_000i128;
     token_admin.mint(&subscriber, &(min_topup * 5));
 
-    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
+    let sub_id = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &token.address,
+        &1_000_000,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+        &Some(T0 + 2 * INTERVAL),
+    );
 
     client.deposit_funds(&sub_id, &subscriber, &(min_topup * 5));
 
@@ -129,11 +147,22 @@ fn test_expiration_vs_cancellation() {
     let (env, client, token, token_admin, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    let min_topup = 1_000_000i128;
+    token_admin.mint(&subscriber, &(min_topup * 5));
 
     let expires_at = T0 + 2 * INTERVAL;
 
     // Scenario 1: Cancel before expiry
-    let sub_id1 = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
+    let sub_id1 = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &token.address,
+        &1_000_000,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+        &Some(expires_at),
+    );
     
     client.cancel_subscription(&sub_id1, &subscriber);
     assert_eq!(
@@ -155,10 +184,19 @@ fn test_expiration_vs_cancellation() {
     );
 
     // Scenario 2: Expire without cancel
-    let sub_id2 = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
+    let sub_id2 = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &token.address,
+        &1_000_000,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+        &Some(expires_at),
+    );
     
     // Trigger expiration
-    env.ledger().with_mut(|l| l.timestamp = 1060);
+    env.ledger().with_mut(|l| l.timestamp = T0 + 2 * INTERVAL + 1);
     let res = client.try_cancel_subscription(&sub_id2, &subscriber);
     assert!(res.is_err()); // Cannot cancel an expired subscription directly, it is already expired
 
@@ -172,14 +210,23 @@ fn test_expiration_vs_cancellation() {
 
 #[test]
 fn test_deposit_rejected_when_expired() {
-    let (env, client, _token, token_admin, _) = setup_test_env();
+    let (env, client, token, token_admin, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
 
     let min_topup = 1_000_000i128;
     token_admin.mint(&subscriber, &(min_topup * 5));
 
-    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
+    let sub_id = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &token.address,
+        &1_000_000,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+        &Some(T0 + 2 * INTERVAL),
+    );
 
     // Advance past expiry
     env.ledger().with_mut(|l| l.timestamp = T0 + 3 * INTERVAL);
