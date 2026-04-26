@@ -340,6 +340,7 @@ fn test_lifetime_cap_oneoff_exact_hit_auto_cancels() {
     );
     client.deposit_funds(&sub_id, &subscriber, &20_000_000i128);
     client.charge_one_off(&sub_id, &merchant, &cap);
+    let events = env.events().all();
 
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);

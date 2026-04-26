@@ -1015,11 +1015,10 @@ pub struct MerchantRefundEvent {
 /// Event emitted when a protocol fee is charged.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct ProtocolFeeChargedEvent {
-    pub subscription_id: u32,
+pub struct ProtocolFeeConfiguredEvent {
+    pub admin: Address,
     pub treasury: Address,
-    pub fee_amount: i128,
-    pub merchant_amount: i128,
+    pub fee_bps: u32,
     pub timestamp: u64,
 }
 
