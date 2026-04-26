@@ -22,9 +22,8 @@
 
 use crate::safe_math::{safe_add, safe_sub, validate_non_negative};
 use crate::types::{
-    is_valid_allowed_operations, AccruedTotals, BillingChargeKind, DataKey, Error, MerchantConfig,
-    MerchantConfigInitializedEvent, MerchantConfigUpdatedEvent, MerchantPausedEvent,
-    MerchantUnpausedEvent, TokenEarnings, TokenReconciliationSnapshot, OP_CHARGE, MAX_FEE_BIPS,
+    AccruedTotals, BillingChargeKind, DataKey, Error, MerchantConfig, MerchantPausedEvent,
+    MerchantUnpausedEvent, MerchantWithdrawalEvent, TokenEarnings, TokenReconciliationSnapshot,
 };
 use soroban_sdk::{token, Address, Env, String, Symbol, Vec};
 
@@ -176,89 +175,8 @@ pub fn get_merchant_config(env: &Env, merchant: Address) -> Option<MerchantConfi
     env.storage().instance().get(&key)
 }
 
-pub fn update_merchant_config(
-    env: &Env,
-    merchant: Address,
-    new_payout_address: Option<Address>,
-    new_fee_bips: Option<i32>,
-    new_allowed_operations: Option<i32>,
-    new_is_active: Option<bool>,
-    new_fee_address: Option<Option<Address>>,
-    new_redirect_url: Option<String>,
-    new_is_paused: Option<bool>,
-) -> Result<MerchantConfig, Error> {
-    merchant.require_auth();
-
-    let key = DataKey::MerchantConfig(merchant.clone());
-    let mut config: MerchantConfig = env.storage().instance().get(&key)
-        .ok_or(Error::ConfigNotFound)?;
-
-    if let Some(payout) = new_payout_address {
-        config.payout_address = payout;
-    }
-
-    if let Some(fee) = new_fee_bips {
-        if fee > MAX_FEE_BIPS {
-            return Err(Error::InvalidFeeBips);
-        }
-        config.fee_bips = fee;
-    }
-
-    if let Some(ops) = new_allowed_operations {
-        if !is_valid_allowed_operations(ops) {
-            return Err(Error::InvalidOperations);
-        }
-        if ops & OP_CHARGE == 0 {
-            return Err(Error::MustAllowChargeOperation);
-        }
-        config.allowed_operations = ops;
-    }
-
-    if let Some(active) = new_is_active {
-        config.is_active = active;
-    }
-
-    if let Some(fee_addr) = new_fee_address {
-        config.fee_address = fee_addr;
-    }
-
-    if let Some(url) = new_redirect_url {
-        config.redirect_url = url;
-    }
-
-    if let Some(paused) = new_is_paused {
-        config.is_paused = paused;
-    }
-
-    config.last_updated = env.ledger().timestamp();
-    let timestamp = config.last_updated;
-    env.storage().instance().set(&key, &config);
-
-    env.events().publish(
-        (Symbol::new(env, "merchant_config_updated"),),
-        MerchantConfigUpdatedEvent {
-            merchant: merchant.clone(),
-            payout_address: config.payout_address.clone(),
-            fee_bips: config.fee_bips,
-            allowed_operations: config.allowed_operations,
-            is_active: config.is_active,
-            timestamp,
-        },
-    );
-
-    Ok(config)
-}
-
-fn merchant_balance_key(
-    env: &Env,
-    merchant: &Address,
-    token: &Address,
-) -> (Symbol, Address, Address) {
-    (
-        Symbol::new(env, "merchant_balance"),
-        merchant.clone(),
-        token.clone(),
-    )
+fn merchant_balance_key(merchant: &Address, token: &Address) -> DataKey {
+    DataKey::MerchantBalance(merchant.clone(), token.clone())
 }
 
 pub fn get_merchant_token_earnings(
@@ -351,12 +269,12 @@ pub fn get_merchant_balance(env: &Env, merchant: &Address) -> i128 {
 }
 
 pub fn get_merchant_balance_by_token(env: &Env, merchant: &Address, token: &Address) -> i128 {
-    let key = merchant_balance_key(env, merchant, token);
+    let key = merchant_balance_key(merchant, token);
     env.storage().instance().get(&key).unwrap_or(0i128)
 }
 
 fn set_merchant_balance(env: &Env, merchant: &Address, token: &Address, balance: &i128) {
-    let key = merchant_balance_key(env, merchant, token);
+    let key = merchant_balance_key(merchant, token);
     env.storage().instance().set(&key, balance);
 }
 
@@ -458,8 +376,8 @@ pub fn withdraw_merchant_funds_for_token(
     set_merchant_balance(env, &merchant, &token_addr, &new_balance);
     crate::accounting::sub_total_accounted(env, &token_addr, amount)?;
     env.events().publish(
-        (Symbol::new(env, "withdrawn"), merchant.clone(), token_addr.clone()),
-        crate::types::MerchantWithdrawalEvent {
+        (Symbol::new(env, "withdrawn"), merchant.clone()),
+        MerchantWithdrawalEvent {
             merchant: merchant.clone(),
             token: token_addr.clone(),
             amount,
