@@ -3,7 +3,7 @@
 //! Kept in a separate module to reduce merge conflicts when editing state machine
 //! or contract entrypoints.
 
-use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
+use soroban_sdk::{ contracterror, contracttype, Address, String, Vec };
 
 /// Maximum number of metadata keys per subscription.
 pub const MAX_METADATA_KEYS: u32 = 10;
@@ -209,11 +209,7 @@ pub struct Subscription {
 
 impl Subscription {
     pub fn is_expired(&self, current_time: u64) -> bool {
-        if let Some(exp) = self.expires_at {
-            current_time >= exp
-        } else {
-            false
-        }
+        if let Some(exp) = self.expires_at { current_time >= exp } else { false }
     }
 }
 
