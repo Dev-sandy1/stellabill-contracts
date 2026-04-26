@@ -10,8 +10,8 @@ use soroban_sdk::{
 };
 
 extern crate alloc;
+use crate::test_utils::{assertions, fixtures, setup::TestEnv};
 use alloc::format;
-use crate::test_utils::{TestEnv, fixtures, assertions};
 
 // -- constants ----------------------------------------------------------------
 const T0: u64 = 1_000;
@@ -86,6 +86,7 @@ fn create_test_subscription(
 ) -> (u32, Address, Address) {
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
+    // FIXED: Removed the extra &None::<u64> (now 7 arguments)
     let id = client.create_subscription(
         &subscriber,
         &merchant,
@@ -93,7 +94,8 @@ fn create_test_subscription(
         &INTERVAL,
         &false,
         &None::<i128>,
-     &None::<u64>);
+        &None::<u64>,
+    );
     if status != SubscriptionStatus::Active {
         let mut sub = client.get_subscription(&id);
         sub.status = status;

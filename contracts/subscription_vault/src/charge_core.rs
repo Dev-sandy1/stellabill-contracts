@@ -73,7 +73,7 @@ pub fn charge_one(
         return Err(Error::SubscriptionExpired);
     }
 
-    let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
+    let charge_amount = crate::oracle::resolve_charge_amount(env, subscription_id, &sub)?;
 
     if let Some(cap) = sub.lifetime_cap {
         if sub.lifetime_charged >= cap {

@@ -658,7 +658,7 @@ pub fn do_charge_one_off(
     merchant.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
-    
+
     let now = env.ledger().timestamp();
     // Expiration guard
     if sub.is_expired(now) {
@@ -796,14 +796,17 @@ pub fn do_cleanup_subscription(
     // Can only cleanup if it's already expired or cancelled
     let now = env.ledger().timestamp();
     let is_terminal = sub.status == SubscriptionStatus::Cancelled || sub.is_expired(now);
-    
+
     if !is_terminal {
         return Err(Error::InvalidStatusTransition);
     }
 
     if sub.status != SubscriptionStatus::Archived {
         // If it's expired but not yet marked as Expired or Cancelled, transition it to Expired first
-        if sub.status != SubscriptionStatus::Cancelled && sub.status != SubscriptionStatus::Expired && sub.is_expired(now) {
+        if sub.status != SubscriptionStatus::Cancelled
+            && sub.status != SubscriptionStatus::Expired
+            && sub.is_expired(now)
+        {
             validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
             sub.status = SubscriptionStatus::Expired;
         }

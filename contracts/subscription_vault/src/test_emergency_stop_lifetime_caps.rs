@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use crate::{ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
+use crate::{
+    ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+};
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::{Address, Env, FromVal, String, Symbol, Val, Vec, symbol_short};
 
@@ -48,13 +50,8 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
     );
     client.deposit_funds(&sub_id, &subscriber, &10_000_000i128);
 
-    let plan_id = client.create_plan_template(
-        &merchant,
-        &1_000_000i128,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
+    let plan_id =
+        client.create_plan_template(&merchant, &1_000_000i128, &INTERVAL, &false, &None::<i128>);
 
     client.enable_emergency_stop(&admin);
     assert!(client.get_emergency_stop_status());
@@ -122,7 +119,10 @@ fn test_emergency_stop_blocks_all_critical_create_deposit_charge_paths() {
     assert!(!client.get_emergency_stop_status());
 
     let resumed_id = client.create_subscription_from_plan(&subscriber, &plan_id);
-    assert_eq!(client.get_subscription(&resumed_id).status, SubscriptionStatus::Active);
+    assert_eq!(
+        client.get_subscription(&resumed_id).status,
+        SubscriptionStatus::Active
+    );
 }
 
 #[test]
@@ -266,11 +266,7 @@ fn test_lifetime_cap_usage_exact_hit_charges_then_auto_cancels() {
         &None::<u64>,
     );
     client.deposit_funds(&sub_id, &subscriber, &DEPOSIT);
-    client.charge_usage_with_reference(
-        &sub_id,
-        &cap,
-        &String::from_str(&env, "cap-exact-usage"),
-    );
+    client.charge_usage_with_reference(&sub_id, &cap, &String::from_str(&env, "cap-exact-usage"));
 
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.prepaid_balance, DEPOSIT - cap);

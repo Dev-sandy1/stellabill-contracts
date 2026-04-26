@@ -649,6 +649,28 @@ pub struct OraclePrice {
     pub timestamp: u64,
 }
 
+/// Event emitted when oracle configuration is updated by an admin.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleConfigUpdatedEvent {
+    pub enabled: bool,
+    pub oracle: Option<Address>,
+    pub max_age_seconds: u64,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a cross-currency charge resolves its amount via oracle.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OracleChargeResolvedEvent {
+    pub subscription_id: u32,
+    pub quote_amount: i128,
+    pub token_amount: i128,
+    pub price: i128,
+    pub price_timestamp: u64,
+    pub timestamp: u64,
+}
+
 /// Token registry entry.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
