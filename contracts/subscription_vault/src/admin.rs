@@ -340,6 +340,7 @@ pub fn set_protocol_fee(
         crate::types::ProtocolFeeConfiguredEvent {
             treasury: Some(treasury),
             fee_bps,
+            treasury: Some(treasury),
             timestamp: env.ledger().timestamp(),
         },
     );

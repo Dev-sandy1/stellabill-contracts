@@ -25,7 +25,7 @@ use crate::types::{
     AccruedTotals, BillingChargeKind, DataKey, Error, MerchantConfig, MerchantPausedEvent,
     MerchantUnpausedEvent, MerchantWithdrawalEvent, TokenEarnings, TokenReconciliationSnapshot,
 };
-use soroban_sdk::{token, Address, Env, Symbol, Vec};
+use soroban_sdk::{token, Address, Env, String, Symbol, Vec};
 
 pub fn get_merchant_paused(env: &Env, merchant: Address) -> bool {
     // Check both legacy Pause state and new Config state if they overlap
@@ -83,14 +83,90 @@ pub fn unpause_merchant(env: &Env, merchant: Address) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_merchant_config_input(
+    _payout_address: &Address,
+    fee_bips: i32,
+    allowed_operations: i32,
+) -> Result<(), Error> {
+    if fee_bips > MAX_FEE_BIPS {
+        return Err(Error::InvalidFeeBips);
+    }
+    if !is_valid_allowed_operations(allowed_operations) {
+        return Err(Error::InvalidOperations);
+    }
+    if allowed_operations & OP_CHARGE == 0 {
+        return Err(Error::MustAllowChargeOperation);
+    }
+    Ok(())
+}
+
+pub fn initialize_merchant_config(
+    env: &Env,
+    merchant: Address,
+    payout_address: Address,
+    fee_bips: i32,
+    allowed_operations: i32,
+    fee_address: Option<Address>,
+    redirect_url: String,
+) -> Result<MerchantConfig, Error> {
+    merchant.require_auth();
+    validate_merchant_config_input(&payout_address, fee_bips, allowed_operations)?;
+
+    let config = MerchantConfig {
+        version: 1,
+        payout_address,
+        fee_bips,
+        allowed_operations,
+        is_active: true,
+        fee_address,
+        redirect_url,
+        is_paused: false,
+        last_updated: env.ledger().timestamp(),
+    };
+
+    let key = DataKey::MerchantConfig(merchant.clone());
+    env.storage().instance().set(&key, &config);
+
+    env.events().publish(
+        (Symbol::new(env, "merchant_config_initialized"),),
+        MerchantConfigInitializedEvent {
+            merchant: merchant.clone(),
+            payout_address: config.payout_address.clone(),
+            fee_bips: config.fee_bips,
+            allowed_operations: config.allowed_operations,
+            timestamp: config.last_updated,
+        },
+    );
+
+    Ok(config)
+}
+
 pub fn set_merchant_config(
     env: &Env,
     merchant: Address,
     config: MerchantConfig,
 ) -> Result<(), Error> {
     merchant.require_auth();
-    let key = DataKey::MerchantConfig(merchant);
-    env.storage().instance().set(&key, &config);
+    validate_merchant_config_input(&config.payout_address, config.fee_bips, config.allowed_operations)?;
+
+    let key = DataKey::MerchantConfig(merchant.clone());
+    let timestamp = env.ledger().timestamp();
+    let mut updated_config = config;
+    updated_config.last_updated = timestamp;
+    env.storage().instance().set(&key, &updated_config);
+
+    env.events().publish(
+        (Symbol::new(env, "merchant_config_set"),),
+        MerchantConfigUpdatedEvent {
+            merchant: merchant.clone(),
+            payout_address: updated_config.payout_address.clone(),
+            fee_bips: updated_config.fee_bips,
+            allowed_operations: updated_config.allowed_operations,
+            is_active: updated_config.is_active,
+            timestamp,
+        },
+    );
+
     Ok(())
 }
 

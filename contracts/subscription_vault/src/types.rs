@@ -1005,12 +1005,48 @@ pub struct PartialRefundEvent {
     pub timestamp: u64,
 }
 
+/// Operation flags for merchant configuration.
+/// Each flag is a bit in the allowed_operations bitmap.
+pub const OP_CHARGE: i32 = 1 << 0; // 0x01 - Can charge subscribers
+pub const OP_WITHDRAW: i32 = 1 << 1; // 0x02 - Can withdraw earnings
+pub const OP_REFUND: i32 = 1 << 2; // 0x04 - Can issue refunds to subscribers
+pub const OP_BILLING_PAUSE: i32 = 1 << 3; // 0x08 - Can pause subscriptions globally
+pub const OP_AUTO_RENEWAL: i32 = 1 << 4; // 0x10 - Auto-renewal enabled
+
+/// Default allowed operations for a new merchant config.
+pub const DEFAULT_ALLOWED_OPS: i32 = OP_CHARGE | OP_WITHDRAW | OP_REFUND | OP_AUTO_RENEWAL;
+
+/// Maximum fee in bips (100% = 10000 bips).
+pub const MAX_FEE_BIPS: i32 = 10000;
+
+/// Validates that the allowed_operations bitmap contains only valid operation bits.
+pub fn is_valid_allowed_operations(ops: i32) -> bool {
+    let valid_mask = OP_CHARGE | OP_WITHDRAW | OP_REFUND | OP_BILLING_PAUSE | OP_AUTO_RENEWAL;
+    ops & !valid_mask == 0
+}
+
+/// Extended merchant configuration with payout settings and operational flags.
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct MerchantConfig {
+    /// Version for forward-compatible config upgrades.
+    pub version: i32,
+    /// Address where merchant receives payouts.
+    pub payout_address: Address,
+    /// Fee percentage in bips (0-10000, where 10000 = 100%).
+    pub fee_bips: i32,
+    /// Bitmap of allowed operations (see OP_* constants).
+    pub allowed_operations: i32,
+    /// Whether the merchant can receive charges and payouts.
+    pub is_active: bool,
+    /// Address for fee routing (optional).
     pub fee_address: Option<Address>,
-    pub redirect_url: String, // e.g., for off-chain success callbacks
-    pub is_paused: bool,      // Global pause for all merchant plans
+    /// Redirect URL for off-chain callbacks.
+    pub redirect_url: String,
+    /// Global pause for all merchant plans (legacy, prefer is_active).
+    pub is_paused: bool,
+    /// Timestamp of last config update.
+    pub last_updated: u64,
 }
 
 /// Event emitted when a merchant enables their blanket pause.
