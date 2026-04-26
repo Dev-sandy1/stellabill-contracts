@@ -8126,4 +8126,3 @@ fn test_compaction_aggregation_accuracy() {
     assert_eq!(agg.total_amount + live_total, sub.lifetime_charged);
     assert_eq!(sub.lifetime_charged, 27_000_000i128);
 }
-

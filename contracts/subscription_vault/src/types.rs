@@ -738,6 +738,9 @@ pub struct SubscriptionChargedEvent {
     pub merchant: Address,
     pub amount: i128,
     pub lifetime_charged: i128,
+    pub timestamp: u64,
+    pub period_start: u64,
+    pub period_end: u64,
 }
 
 /// Event emitted when an interval charge attempt cannot be completed due to

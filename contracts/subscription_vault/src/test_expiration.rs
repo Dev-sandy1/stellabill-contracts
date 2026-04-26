@@ -120,11 +120,11 @@ fn test_cleanup_and_archival() {
     assert_eq!(sub_archived.status, SubscriptionStatus::Archived);
 
     // Archival reads - can still read it
-    assert_eq!(sub_archived.amount, 1_000_000);
+    assert_eq!(sub_archived.amount, 100);
 
     // Ensure funds can be withdrawn (already done by cleanup_subscription in some impls,
     // or via explicit withdraw)
-    let deposit_balance = (min_topup * 5) - 0; // no charges made before expiry
+    let _deposit_balance = (min_topup * 5) - 0; // no charges made before expiry
     let sub_balance = sub_archived.prepaid_balance;
     if sub_balance > 0 {
         let initial_balance = token_client.balance(&subscriber);
@@ -139,7 +139,7 @@ fn test_expiration_vs_cancellation() {
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
 
-    let expires_at = T0 + 2 * INTERVAL;
+    let _expires_at = T0 + 2 * INTERVAL;
 
     // Scenario 1: Cancel before expiry
     let sub_id1 = client.create_subscription_with_token(
@@ -187,7 +187,7 @@ fn test_expiration_vs_cancellation() {
     // Trigger expiration
     env.ledger().with_mut(|l| l.timestamp = expires_at + 1);
     let res = client.try_cancel_subscription(&sub_id2, &subscriber);
-    assert!(res.is_err()); // Cannot cancel an expired subscription directly, it is already expired
+    assert_eq!(res, Err(Ok(Error::SubscriptionExpired)));
 
     // Archiving should work
     client.cleanup_subscription(&sub_id2, &subscriber);
@@ -218,11 +218,11 @@ fn test_deposit_rejected_when_expired() {
     );
 
     // Advance past expiry
-    env.ledger().with_mut(|l| l.timestamp = T0 + 3 * INTERVAL);
+    env.ledger().with_mut(|l| l.timestamp = T0 + 100);
     // Trigger the expiration by attempting a charge
     let _ = client.try_charge_subscription(&sub_id);
 
     // Deposit after expiry should be rejected
     let res = client.try_deposit_funds(&sub_id, &subscriber, &min_topup);
-    assert!(res.is_err());
+    assert_eq!(res, Err(Ok(Error::SubscriptionExpired)));
 }

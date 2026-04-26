@@ -88,7 +88,7 @@ mod statements;
 mod subscription;
 mod types;
 #[cfg(test)]
-mod test_utils;
+pub mod test_utils;
 #[cfg(test)]
 mod test;
 #[cfg(test)]

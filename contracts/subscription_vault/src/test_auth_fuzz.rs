@@ -5,7 +5,7 @@ use crate::{
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    Address, Env, Vec as SorobanVec, IntoVal, Val,
+    Address, Env, Vec as SorobanVec, IntoVal,
 };
 
 // ── Roles ────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 use crate::{ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
-use soroban_sdk::{Address, Env, FromVal, String, Symbol, Val, Vec};
+use soroban_sdk::{Address, Env, FromVal, String, Symbol, Val, Vec, symbol_short};
 
 const T0: u64 = 1_700_000_000;
 const INTERVAL: u64 = 30 * 24 * 60 * 60;
@@ -25,8 +25,8 @@ fn setup() -> (Env, SubscriptionVaultClient<'static>, Address, Address) {
     (env, client, token, admin)
 }
 
-fn topic0(env: &Env, event: &(Address, Vec<Val>, Val)) -> Symbol {
-    Symbol::from_val(env, &event.1.get(0).unwrap())
+fn topic0(_env: &Env, event: &(Address, Vec<Val>, Val)) -> Val {
+    event.1.get(0).unwrap()
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_emergency_stop_toggle_is_idempotent_and_emits_events_once_per_transition
     let enabled_events = env.events().all();
     assert_eq!(enabled_events.len(), 1);
     assert_eq!(
-        topic0(&env, &enabled_events.get(0).unwrap()),
+        Symbol::from_val(&env, &topic0(&env, &enabled_events.get(0).unwrap())),
         Symbol::new(&env, "emergency_stop_enabled")
     );
 
@@ -145,7 +145,7 @@ fn test_emergency_stop_toggle_is_idempotent_and_emits_events_once_per_transition
     let disabled_events = env.events().all();
     assert_eq!(disabled_events.len(), 1);
     assert_eq!(
-        topic0(&env, &disabled_events.get(0).unwrap()),
+        Symbol::from_val(&env, &topic0(&env, &disabled_events.get(0).unwrap())),
         Symbol::new(&env, "emergency_stop_disabled")
     );
 
