@@ -57,21 +57,21 @@ pub enum DataKey {
     /// Maps a merchant address to its list of subscription IDs. Discriminant 0.
     MerchantSubs(Address),
     /// USDC token contract address. Discriminant 1.
-    Token,
+    Token = 1,
     /// Authorized admin address. Discriminant 2.
-    Admin,
+    Admin = 2,
     /// Minimum deposit threshold. Discriminant 3.
-    MinTopup,
+    MinTopup = 3,
     /// Auto-incrementing subscription ID counter. Discriminant 4.
-    NextId,
+    NextId = 4,
     /// On-chain storage schema version. Discriminant 5.
-    SchemaVersion,
+    SchemaVersion = 5,
     /// Subscription record keyed by its ID. Discriminant 6.
-    Sub(u32),
+    Sub(u32) = 6,
     /// Last charged billing-period index for replay protection. Discriminant 7.
-    ChargedPeriod(u32),
+    ChargedPeriod(u32) = 7,
     /// Idempotency key stored per subscription. Discriminant 8.
-    IdemKey(u32),
+    IdemKey(u32) = 8,
     /// Emergency stop flag - when true, critical operations are blocked. Discriminant 9.
     EmergencyStop,
     /// Merchant-wide pause flag. Discriminant 10.
