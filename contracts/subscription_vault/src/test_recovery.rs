@@ -47,7 +47,7 @@ fn test_recovery_success_all_reasons() {
 
     for (i, reason) in reasons.iter().enumerate() {
         let recovery_id = String::from_str(&env, &format!("rec_{}", i));
-        let amount = 10_000_000;
+        let amount = 10_000_000i128;
         
         let balance_before = token::Client::new(&env, &token).balance(&recipient);
         
@@ -138,7 +138,7 @@ fn test_state_consistency() {
     
     let sub_id = client.create_subscription(&subscriber, &merchant, &10_000_000, &INTERVAL, &false, &None, &None::<u64>);
     
-    client.deposit_funds(&sub_id, &subscriber, &50_000_000);
+    client.deposit_funds(&sub_id, &subscriber, &50_000_000i128);
     
     // Total accounted should be 50M. Contract balance is 50M.
     // Try to recover 1 from accounted funds - should fail
