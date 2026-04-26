@@ -36,21 +36,11 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, ChargeExecutionResult, DataKey, Error,
-    LifetimeCapReachedEvent, Subscription, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
+    LifetimeCapReachedEvent, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
     SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
+    SNAPSHOT_FLAG_CLOSED, SNAPSHOT_FLAG_INTERVAL_CHARGED,
 };
 use soroban_sdk::{symbol_short, Env, String, Symbol};
-
-const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
-const KEY_IDEM: Symbol = symbol_short!("idem");
-
-fn charged_period_key(subscription_id: u32) -> (Symbol, u32) {
-    (KEY_CHARGED_PERIOD, subscription_id)
-}
-
-fn idem_key(subscription_id: u32) -> (Symbol, u32) {
-    (KEY_IDEM, subscription_id)
-}
 
 /// Performs a single interval-based charge with optional replay protection.
 pub fn charge_one(
@@ -71,7 +61,7 @@ pub fn charge_one(
         if sub.status != SubscriptionStatus::Expired {
             validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
             sub.status = SubscriptionStatus::Expired;
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
             env.events().publish(
                 (Symbol::new(env, "subscription_expired"), subscription_id),
                 crate::types::SubscriptionExpiredEvent {
@@ -85,6 +75,26 @@ pub fn charge_one(
 
     let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
 
+    if let Some(cap) = sub.lifetime_cap {
+        if sub.lifetime_charged >= cap {
+            if sub.status != SubscriptionStatus::Cancelled {
+                validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+                sub.status = SubscriptionStatus::Cancelled;
+                env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
+                env.events().publish(
+                    (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                    LifetimeCapReachedEvent {
+                        subscription_id,
+                        lifetime_cap: cap,
+                        lifetime_charged: sub.lifetime_charged,
+                        timestamp: now,
+                    },
+                );
+            }
+            return Ok(ChargeExecutionResult::LifetimeCapReached);
+        }
+    }
+
     if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
         return Err(Error::NotActive);
     }
@@ -96,7 +106,7 @@ pub fn charge_one(
         if let Some(stored) = env
             .storage()
             .instance()
-            .get::<_, soroban_sdk::BytesN<32>>(&idem_key(subscription_id))
+            .get::<_, soroban_sdk::BytesN<32>>(&DataKey::IdemKey(subscription_id))
         {
             if stored == *k {
                 return Ok(ChargeExecutionResult::Charged);
@@ -108,7 +118,7 @@ pub fn charge_one(
     if let Some(stored_period) = env
         .storage()
         .instance()
-        .get::<_, u64>(&charged_period_key(subscription_id))
+        .get::<_, u64>(&DataKey::ChargedPeriod(subscription_id))
     {
         if period_index <= stored_period {
             return Err(Error::Replay);
@@ -125,13 +135,18 @@ pub fn charge_one(
 
     // -- Lifetime cap pre-check -----------------------------------------------
     if let Some(cap) = sub.lifetime_cap {
-        let remaining = safe_sub(cap, sub.lifetime_charged).unwrap_or(0).max(0);
+        let remaining = if sub.lifetime_charged >= cap {
+            0
+        } else {
+            safe_sub(cap, sub.lifetime_charged)?
+        };
 
         if remaining == 0 || charge_amount > remaining {
-            // Cap already exhausted or this charge would exceed it — cancel.
+            // Cap already exhausted or this charge would exceed it: cancel without
+            // moving funds and return an explicit terminal error.
             validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
             sub.status = SubscriptionStatus::Cancelled;
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
 
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
@@ -143,7 +158,7 @@ pub fn charge_one(
                 },
             );
 
-            return Ok(ChargeExecutionResult::Charged);
+            return Ok(ChargeExecutionResult::LifetimeCapReached);
         }
     }
 
@@ -214,7 +229,7 @@ pub fn charge_one(
                 sub.status = SubscriptionStatus::Cancelled;
             }
 
-            storage.set(&subscription_id, &sub);
+            storage.set(&DataKey::Sub(subscription_id), &sub);
             append_statement(
                 env,
                 subscription_id,
@@ -225,10 +240,24 @@ pub fn charge_one(
                 now,
             )?;
 
+            crate::period_snapshots::write_period_snapshot(
+                env,
+                BillingPeriodSnapshot {
+                    subscription_id,
+                    period_index,
+                    period_start: next_allowed.saturating_sub(sub.interval_seconds),
+                    period_end: now,
+                    total_charged: charge_amount,
+                    total_usage_units: 0,
+                    status_flags: SNAPSHOT_FLAG_CLOSED | SNAPSHOT_FLAG_INTERVAL_CHARGED,
+                    finalized_at: now,
+                },
+            )?;
+
             // Record charged period and optional idempotency key
-            storage.set(&charged_period_key(subscription_id), &period_index);
+            storage.set(&DataKey::ChargedPeriod(subscription_id), &period_index);
             if let Some(k) = idempotency_key {
-                storage.set(&idem_key(subscription_id), &k);
+                storage.set(&DataKey::IdemKey(subscription_id), &k);
             }
 
             env.events().publish(
@@ -257,9 +286,8 @@ pub fn charge_one(
 
             Ok(ChargeExecutionResult::Charged)
         }
-        // charge_one.rs  —  replace the entire Err(_) arm in charge_one()
         Err(_) => {
-            let grace_duration = crate::admin::get_grace_period(env).unwrap_or(0);
+            let grace_duration = crate::admin::get_grace_period(env)?;
             let due_timestamp = sub
                 .last_payment_timestamp
                 .checked_add(sub.interval_seconds)
@@ -280,7 +308,7 @@ pub fn charge_one(
                 sub.status = target_status.clone();
             }
 
-            storage.set(&subscription_id, &sub);
+            storage.set(&DataKey::Sub(subscription_id), &sub);
 
             let shortfall = charge_amount.saturating_sub(sub.prepaid_balance).max(0);
             env.events().publish(
@@ -321,7 +349,7 @@ pub fn charge_usage_one(
         if sub.status != SubscriptionStatus::Expired {
             validate_status_transition(&sub.status, &SubscriptionStatus::Expired)?;
             sub.status = SubscriptionStatus::Expired;
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
             env.events().publish(
                 (Symbol::new(env, "subscription_expired"), subscription_id),
                 crate::types::SubscriptionExpiredEvent {
@@ -331,6 +359,26 @@ pub fn charge_usage_one(
             );
         }
         return Err(Error::SubscriptionExpired);
+    }
+
+    if let Some(cap) = sub.lifetime_cap {
+        if sub.lifetime_charged >= cap {
+            if sub.status != SubscriptionStatus::Cancelled {
+                validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+                sub.status = SubscriptionStatus::Cancelled;
+                env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
+                env.events().publish(
+                    (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                    LifetimeCapReachedEvent {
+                        subscription_id,
+                        lifetime_cap: cap,
+                        lifetime_charged: sub.lifetime_charged,
+                        timestamp: now,
+                    },
+                );
+            }
+            return Err(Error::LifetimeCapReached);
+        }
     }
 
     if sub.status != SubscriptionStatus::Active {
@@ -436,7 +484,7 @@ pub fn charge_usage_one(
         if pending_lifetime > cap {
             validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
             sub.status = SubscriptionStatus::Cancelled;
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
                 LifetimeCapReachedEvent {
@@ -476,7 +524,7 @@ pub fn charge_usage_one(
                 sub.status = SubscriptionStatus::InsufficientBalance;
             }
 
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
             env.storage().instance().set(&ref_key, &true); // Mark reference as used
 
             append_statement(
@@ -519,7 +567,7 @@ pub fn charge_usage_one(
         Err(_) => {
             validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
             sub.status = SubscriptionStatus::InsufficientBalance;
-            env.storage().instance().set(&subscription_id, &sub);
+            env.storage().instance().set(&DataKey::Sub(subscription_id), &sub);
 
             env.events().publish(
                 (Symbol::new(env, "charge_failed"), subscription_id),
