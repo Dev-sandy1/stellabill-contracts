@@ -1,6 +1,6 @@
 use crate::{
     safe_math::{safe_add, safe_sub},
-    Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+    Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient, types::DataKey,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -114,7 +114,7 @@ fn test_replay_protection_same_timestamp_rejected() {
     sub.prepaid_balance = PREPAID;
     sub.status = SubscriptionStatus::Active;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
@@ -140,7 +140,7 @@ fn test_replay_protection_on_batch_charge() {
     sub.prepaid_balance = PREPAID;
     sub.status = SubscriptionStatus::Active;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
@@ -211,7 +211,7 @@ fn test_chained_charge_and_cancel_preserves_balance() {
     sub.prepaid_balance = PREPAID;
     sub.status = SubscriptionStatus::Active;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     // We also need to mint tokens to the contract to simulate the vault holding the funds

@@ -1,6 +1,6 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
-    ChargeExecutionResult, Error, MerchantWithdrawalEvent, OraclePrice,
+    ChargeExecutionResult, DataKey, Error, MerchantWithdrawalEvent, OraclePrice,
     RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
     MAX_SUBSCRIPTION_ID, MAX_SUBSCRIPTION_LIST_PAGE,
 };
@@ -98,7 +98,7 @@ fn create_test_subscription(
         let mut sub = client.get_subscription(&id);
         sub.status = status;
         env.as_contract(&client.address, || {
-            env.storage().instance().set(&id, &sub);
+            env.storage().instance().set(&DataKey::Sub(id), &sub);
         });
     }
     (id, subscriber, merchant)
@@ -109,7 +109,7 @@ fn seed_balance(env: &Env, client: &SubscriptionVaultClient, id: u32, balance: i
     let mut sub = client.get_subscription(&id);
     sub.prepaid_balance = balance;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 }
 
@@ -118,7 +118,7 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
     env.as_contract(contract_id, || {
         env.storage()
             .instance()
-            .set(&soroban_sdk::Symbol::new(env, "next_id"), &value);
+            .set(&DataKey::NextId, &value);
     });
 }
 
@@ -131,11 +131,7 @@ fn seed_merchant_balance(
 ) {
     env.as_contract(contract_id, || {
         env.storage().instance().set(
-            &(
-                Symbol::new(env, "merchant_balance"),
-                merchant.clone(),
-                token.clone(),
-            ),
+            &DataKey::MerchantBalance(merchant.clone(), token.clone()),
             &balance,
         );
     });
@@ -1567,10 +1563,10 @@ fn test_batch_charge() {
         let mut sub4 = env
             .storage()
             .instance()
-            .get::<u32, Subscription>(&id4)
+            .get::<DataKey, Subscription>(&DataKey::Sub(id4))
             .unwrap();
         sub4.last_payment_timestamp = T0 + INTERVAL + 100; // Will be in the future
-        env.storage().instance().set(&id4, &sub4);
+        env.storage().instance().set(&DataKey::Sub(id4), &sub4);
     });
 
     let ids = Vec::from_array(&env, [id1, 999u32, id2, id3, id4]);
@@ -2372,7 +2368,7 @@ fn test_estimate_topup_overflow_protection() {
     let mut sub = client.get_subscription(&id);
     sub.amount = i128::MAX;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     assert_eq!(
@@ -5722,7 +5718,7 @@ fn set_status(env: &Env, client: &SubscriptionVaultClient, id: u32, status: Subs
     let mut sub = test_env.client.get_subscription(&id);
     sub.status = status;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 }
 
@@ -6865,7 +6861,7 @@ fn test_oracle_price_exactly_at_max_age_boundary_accepted() {
     let mut sub = test_env.client.get_subscription(&id);
     sub.last_payment_timestamp = charge_ts - INTERVAL; // positive, interval elapsed
     test_env.env.as_contract(&test_env.client.address, || {
-        test_env.env.storage().instance().set(&id, &sub);
+        test_env.env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     test_env.env.ledger().set_timestamp(charge_ts);
@@ -6914,7 +6910,7 @@ fn test_oracle_price_one_second_past_max_age_rejected() {
     let mut sub = test_env.client.get_subscription(&id);
     sub.last_payment_timestamp = charge_ts.saturating_sub(INTERVAL);
     test_env.env.as_contract(&test_env.client.address, || {
-        test_env.env.storage().instance().set(&id, &sub);
+        test_env.env.storage().instance().set(&DataKey::Sub(id), &sub);
     });
 
     test_env.env.ledger().set_timestamp(charge_ts);
@@ -6933,15 +6929,12 @@ fn test_oracle_enabled_no_address_stored_returns_not_configured() {
 
     // Force-write enabled=true with no oracle address directly into storage.
     test_env.env.as_contract(&test_env.client.address, || {
-        test_env.env.storage().instance().set(
-            &soroban_sdk::Symbol::new(&test_env.env, "oracle_enabled"),
-            &true,
-        );
-        // oracle_addr key intentionally absent.
-        test_env.env.storage().instance().set(
-            &soroban_sdk::Symbol::new(&test_env.env, "oracle_max_age"),
-            &3600u64,
-        );
+        let config = crate::types::OracleConfig {
+            enabled: true,
+            oracle: None,
+            max_age_seconds: 3600,
+        };
+        test_env.env.storage().instance().set(&crate::types::DataKey::Oracle, &config);
     });
 
     let subscriber = Address::generate(&test_env.env);

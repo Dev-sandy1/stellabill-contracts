@@ -302,7 +302,7 @@ fn test_lifetime_cap_usage_overrun_cancels_without_financial_side_effects() {
     let mut sub = client.get_subscription(&sub_id);
     sub.lifetime_charged = cap - 1;
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&sub_id, &sub);
+        env.storage().instance().set(&crate::types::DataKey::Sub(sub_id), &sub);
     });
 
     assert_eq!(
