@@ -1236,7 +1236,11 @@ impl SubscriptionVault {
     /// This function acquires a reentrancy guard to prevent recursive calls during
     /// state mutations. The guard is automatically released (even on error) via the
     /// Drop trait, guaranteeing cleanup.
-    pub fn charge_usage(env: Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
+    pub fn charge_usage(
+        env: Env,
+        subscription_id: u32,
+        usage_amount: i128,
+    ) -> Result<UsageChargeResult, Error> {
         require_not_emergency_stop(&env)?;
 
         // Acquire reentrancy guard
@@ -1263,7 +1267,7 @@ impl SubscriptionVault {
         subscription_id: u32,
         usage_amount: i128,
         reference: String,
-    ) -> Result<(), Error> {
+    ) -> Result<UsageChargeResult, Error> {
         require_not_emergency_stop(&env)?;
 
         // Acquire reentrancy guard

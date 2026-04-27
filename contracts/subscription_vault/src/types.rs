@@ -125,6 +125,16 @@ pub enum DataKey {
     Oracle,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageChargeResult {
+    Charged = 0,
+    Replay = 1,
+    BurstLimitExceeded = 2,
+    RateLimitExceeded = 3,
+    UsageCapExceeded = 4,
+}
+
 /// Represents the lifecycle state of a subscription.
 ///
 /// See `docs/subscription_lifecycle.md` for how each status is entered and exited.
@@ -1042,6 +1052,30 @@ pub struct UsageStatementEvent {
     pub token: Address,
     pub timestamp: u64,
     pub reference: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UsageChargeRejectedEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    pub usage_amount: i128,
+    pub timestamp: u64,
+    pub reference: String,
+    pub result: UsageChargeResult,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UsageLimitsConfiguredEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub rate_limit_max_calls: Option<u32>,
+    pub rate_window_secs: u64,
+    pub burst_min_interval_secs: u64,
+    pub usage_cap_units: Option<i128>,
+    pub timestamp: u64,
 }
 
 #[contracttype]

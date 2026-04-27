@@ -1642,5 +1642,18 @@ pub fn do_configure_usage_limits(
         .instance()
         .set(&DataKey::UsageLimits(subscription_id), &limits);
 
+    env.events().publish(
+        (Symbol::new(env, "usage_limits_configured"), subscription_id),
+        UsageLimitsConfiguredEvent {
+            subscription_id,
+            merchant,
+            rate_limit_max_calls,
+            rate_window_secs,
+            burst_min_interval_secs,
+            usage_cap_units,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
     Ok(())
 }
