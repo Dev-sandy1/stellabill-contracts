@@ -33,6 +33,7 @@
 use crate::queries::get_subscription;
 use crate::safe_math::{safe_add, safe_sub, safe_sub_balance};
 use crate::state_machine::validate_status_transition;
+use crate::subscription::next_charge_time;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, ChargeExecutionResult, DataKey, Error,
@@ -131,10 +132,7 @@ pub fn charge_one(
         }
     }
 
-    let next_allowed = sub
-        .last_payment_timestamp
-        .checked_add(sub.interval_seconds)
-        .ok_or(Error::Overflow)?;
+    let next_allowed = next_charge_time(sub.last_payment_timestamp, sub.interval_seconds)?;
     if now < next_allowed {
         return Err(Error::IntervalNotElapsed);
     }
