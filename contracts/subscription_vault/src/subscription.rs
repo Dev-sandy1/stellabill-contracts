@@ -1145,6 +1145,7 @@ pub fn do_create_plan_template(
         lifetime_cap,
         template_key: plan_id,
         version: 1,
+        is_disabled: false,
     };
 
     let key = DataKey::Plan(plan_id);
@@ -1196,6 +1197,7 @@ pub fn do_create_plan_template_with_token(
         lifetime_cap,
         template_key: plan_id,
         version: 1,
+        is_disabled: false,
     };
 
     let key = DataKey::Plan(plan_id);
@@ -1227,6 +1229,10 @@ pub fn do_create_subscription_from_plan(
     crate::blocklist::require_not_blocklisted(env, &subscriber)?;
 
     let plan = get_plan_template(env, plan_template_id)?;
+
+    if plan.is_disabled {
+        return Err(Error::InvalidInput);
+    }
 
     // Enforce subscriber-level credit limit for the plan's token.
     enforce_credit_limit_for_delta(env, &subscriber, &plan.token, plan.amount)?;
@@ -1345,6 +1351,7 @@ pub fn do_update_plan_template(
         lifetime_cap,
         template_key: existing.template_key,
         version: new_version,
+        is_disabled: false,
     };
 
     let key = DataKey::Plan(new_plan_id);
@@ -1366,6 +1373,38 @@ pub fn do_update_plan_template(
     );
 
     Ok(new_plan_id)
+}
+
+pub fn do_disable_plan_template(
+    env: &Env,
+    merchant: Address,
+    plan_template_id: u32,
+) -> Result<(), Error> {
+    merchant.require_auth();
+
+    let mut plan = get_plan_template(env, plan_template_id)?;
+    if plan.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+
+    if plan.is_disabled {
+        return Ok(());
+    }
+
+    plan.is_disabled = true;
+    let key = (Symbol::new(env, "plan"), plan_template_id);
+    env.storage().instance().set(&key, &plan);
+
+    env.events().publish(
+        (Symbol::new(env, "plan_disabled"), plan_template_id),
+        crate::types::PlanTemplateDisabledEvent {
+            plan_template_id,
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(())
 }
 
 pub fn do_migrate_subscription_to_plan(

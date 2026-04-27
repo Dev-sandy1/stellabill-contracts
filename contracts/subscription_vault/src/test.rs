@@ -1,7 +1,12 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
+<<<<<<< feature/plan-versioning
+    ChargeExecutionResult, Error, MerchantWithdrawalEvent, OraclePrice, RecoveryReason,
+    Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+=======
     ChargeExecutionResult, DataKey, Error, MerchantWithdrawalEvent, OraclePrice,
     RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+>>>>>>> main
     MAX_SUBSCRIPTION_ID, MAX_SUBSCRIPTION_LIST_PAGE,
 };
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
@@ -10,7 +15,12 @@ use soroban_sdk::{
 };
 
 extern crate alloc;
+<<<<<<< feature/plan-versioning
+use crate::test_utils::setup::TestEnv;
+use crate::test_utils::{assertions, fixtures};
+=======
 use crate::test_utils::{assertions, fixtures, setup::TestEnv};
+>>>>>>> main
 use alloc::format;
 
 // -- constants ----------------------------------------------------------------
@@ -1017,7 +1027,13 @@ fn test_withdraw_subscriber_funds() {
     let subscriber = Address::generate(&test_env.env);
     let merchant = Address::generate(&test_env.env);
 
+<<<<<<< feature/plan-versioning
+    test_env
+        .stellar_token_client()
+        .mint(&subscriber, &1_000_000);
+=======
     test_env.stellar_token_client().mint(&subscriber, &10_000_000);
+>>>>>>> main
 
     let sub_id = test_env.client.create_subscription(
         &subscriber,
@@ -1176,10 +1192,16 @@ fn test_deposit_funds_unauthorized() {
         &INTERVAL,
         &false,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    client.deposit_funds(&id, &subscriber, &5_000_000);
+=======
      &None::<u64>);
     let result = client.try_deposit_funds(&id, &other, &5_000_000);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 
+>>>>>>> main
     let sub = client.get_subscription(&id);
     assert_eq!(sub.prepaid_balance, 0);
 }
@@ -1221,7 +1243,11 @@ fn test_deposit_funds_event_payload() {
 
     // Verify event data: FundsDepositedEvent { subscription_id, subscriber, amount, prepaid_balance }
     let event_data: crate::FundsDepositedEvent =
+<<<<<<< feature/plan-versioning
+        crate::FundsDepositedEvent::from_val(&env, &deposit_event.2);
+=======
         soroban_sdk::FromVal::from_val(&env, &deposit_event.2);
+>>>>>>> main
     assert_eq!(event_data.subscription_id, id);
     assert_eq!(event_data.subscriber, subscriber);
     assert_eq!(event_data.amount, 15_000_000);
@@ -1331,7 +1357,11 @@ fn test_blocklist_add_and_remove_events_capture_reason_variants() {
         Symbol::new(&test_env.env, "blocklist_added")
     );
     let added: crate::BlocklistAddedEvent =
+<<<<<<< feature/plan-versioning
+        crate::BlocklistAddedEvent::from_val(&test_env.env, &add_event.2);
+=======
         soroban_sdk::FromVal::from_val(&test_env.env, &add_event.2);
+>>>>>>> main
     assert_eq!(added.subscriber, subscriber);
     assert_eq!(added.added_by, test_env.admin);
     assert_eq!(added.timestamp, T0);
@@ -1355,7 +1385,11 @@ fn test_blocklist_add_and_remove_events_capture_reason_variants() {
         Symbol::new(&test_env.env, "blocklist_removed")
     );
     let removed: crate::BlocklistRemovedEvent =
+<<<<<<< feature/plan-versioning
+        crate::BlocklistRemovedEvent::from_val(&test_env.env, &remove_event.2);
+=======
         soroban_sdk::FromVal::from_val(&test_env.env, &remove_event.2);
+>>>>>>> main
     assert_eq!(removed.subscriber, subscriber);
     assert_eq!(removed.removed_by, test_env.admin);
     assert_eq!(removed.timestamp, T0 + 60);
@@ -1418,7 +1452,11 @@ fn test_blocklist_enforced_across_mutating_subscription_flows_and_unblock_restor
             &INTERVAL,
             &false,
             &None::<i128>,
+<<<<<<< feature/plan-versioning
+            &None::<u64>
+=======
             &None::<u64>,
+>>>>>>> main
         ),
         Err(Ok(Error::SubscriberBlocklisted))
     );
@@ -1431,7 +1469,11 @@ fn test_blocklist_enforced_across_mutating_subscription_flows_and_unblock_restor
             &INTERVAL,
             &false,
             &None::<i128>,
+<<<<<<< feature/plan-versioning
+            &None::<u64>
+=======
             &None::<u64>,
+>>>>>>> main
         ),
         Err(Ok(Error::SubscriberBlocklisted))
     );
@@ -2309,12 +2351,32 @@ fn test_next_charge_info_cross_check_status_gating() {
         seed_balance(&env, &client, id, PREPAID);
     }
 
+<<<<<<< feature/plan-versioning
+    // Cross-check gating: none of these statuses should allow charging
+    assert_eq!(
+        client.try_charge_subscription(&id_paused),
+        Err(Ok(Error::NotActive))
+    );
+    assert_eq!(
+        client.try_charge_subscription(&id_cancelled),
+        Err(Ok(Error::NotActive))
+    );
+    assert_eq!(
+        client.try_charge_subscription(&id_insufficient),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(
+        client.try_charge_subscription(&id_grace),
+        Err(Ok(Error::NotActive))
+    );
+=======
     // Cross-check gating: paused / cancelled / insufficient states fail immediately.
     // Grace period passes the status gate, but still obeys the interval gate.
     assert_eq!(client.try_charge_subscription(&id_paused), Err(Ok(Error::NotActive)));
     assert_eq!(client.try_charge_subscription(&id_cancelled), Err(Ok(Error::NotActive)));
     assert_eq!(client.try_charge_subscription(&id_insufficient), Err(Ok(Error::NotActive)));
     assert_eq!(client.try_charge_subscription(&id_grace), Err(Ok(Error::IntervalNotElapsed)));
+>>>>>>> main
 }
 
 // -- Top-up estimation (precision) --------------------------------------------
@@ -3217,8 +3279,14 @@ fn test_withdraw_zero_balance_fails() {
         &INTERVAL,
         &false,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    seed_balance(&test_env.env, &test_env.client, id, PREPAID);
+=======
      &None::<u64>);
     test_env.client.cancel_subscription(&id, &subscriber);
+>>>>>>> main
 
     let result = test_env
         .client
@@ -3276,7 +3344,11 @@ fn test_migrate_subscription_requires_plan_origin() {
     );
     let plan_id = test_env.client.create_plan_template(
         &merchant,
+<<<<<<< feature/plan-versioning
+        &(AMOUNT * 2),
+=======
         &(&AMOUNT * 2),
+>>>>>>> main
         &INTERVAL,
         &false,
         &None::<i128>,
@@ -3291,7 +3363,11 @@ fn test_migrate_subscription_requires_plan_origin() {
     assert_eq!(page.subscription_ids.len(), 2);
     assert_eq!(page.subscription_ids.get(0).unwrap(), sub_id);
     assert_eq!(page.subscription_ids.get(1).unwrap(), id2);
+<<<<<<< feature/plan-versioning
+    assert!(page.next_start_id.is_none());
+=======
     assert_eq!(page.next_start_id, None);
+>>>>>>> main
 }
 
 /// Subscriber can withdraw remaining prepaid balance after cap-triggered cancellation.
@@ -3311,9 +3387,18 @@ fn test_cap_cancelled_subscriber_can_withdraw() {
         &AMOUNT,
         &INTERVAL,
         &false,
+<<<<<<< feature/plan-versioning
+        &None::<i128>,
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&sub_id, &subscriber, &5_000_000);
+=======
         &Some(cap),
      &None::<u64>);
     test_env.client.deposit_funds(&sub_id, &subscriber, &5_000_000);
+>>>>>>> main
 
     // Fund the subscription so the vault holds real tokens for withdrawal.
     test_env
@@ -4466,8 +4551,16 @@ fn test_billing_statements_offset_pagination_newest_first() {
         &INTERVAL,
         &true,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&id, &subscriber, &200_000_000i128);
+=======
      &None::<u64>);
     test_env.client.deposit_funds(&id, &subscriber, &200_000_000i128);
+>>>>>>> main
 
     for i in 1..=6 {
         test_env
@@ -4510,8 +4603,16 @@ fn test_billing_statements_cursor_pagination_boundaries() {
         &INTERVAL,
         &true,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&id, &subscriber, &200_000_000i128);
+=======
      &None::<u64>);
     test_env.client.deposit_funds(&id, &subscriber, &200_000_000i128);
+>>>>>>> main
 
     for i in 1..=4 {
         test_env
@@ -4561,8 +4662,16 @@ fn test_compaction_prunes_old_statements_and_keeps_recent() {
         &INTERVAL,
         &false,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&id, &subscriber, &500_000_000i128);
+=======
      &None::<u64>);
     test_env.client.deposit_funds(&id, &subscriber, &500_000_000i128);
+>>>>>>> main
 
     for i in 1..=8 {
         test_env
@@ -4832,8 +4941,16 @@ fn test_oracle_enabled_charge_uses_quote_conversion() {
         &INTERVAL,
         &false,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&id, &subscriber, &100_000_000i128);
+=======
      &None::<u64>);
     test_env.client.deposit_funds(&id, &subscriber, &100_000_000i128);
+>>>>>>> main
 
     test_env.env.ledger().set_timestamp(T0 + INTERVAL);
     test_env.client.charge_subscription(&id);
@@ -4866,8 +4983,16 @@ fn test_oracle_stale_quote_rejected() {
         &INTERVAL,
         &false,
         &None::<i128>,
+<<<<<<< feature/plan-versioning
+        &None::<u64>,
+    );
+    test_env
+        .client
+        .deposit_funds(&id, &subscriber, &100_000_000i128);
+=======
      &None::<u64>);
     test_env.client.deposit_funds(&id, &subscriber, &100_000_000i128);
+>>>>>>> main
 
     let result = test_env.client.try_charge_subscription(&id);
     assert_eq!(result, Err(Ok(Error::OraclePriceStale)));
@@ -5226,8 +5351,13 @@ fn test_admin_rotation_affects_recovery_operations() {
         &test_env.token,
         &recipient,
         &1_000_000i128,
+<<<<<<< feature/plan-versioning
+        &soroban_sdk::String::from_str(&test_env.env, "rec_1"),
+        &RecoveryReason::UserOverpayment,
+=======
         &String::from_str(&test_env.env, "rec_1"),
         &RecoveryReason::AccidentalTransfer,
+>>>>>>> main
     );
 
     test_env.client.rotate_admin(&test_env.admin, &new_admin);
@@ -5274,8 +5404,13 @@ fn test_all_admin_operations_after_rotation() {
         &test_env.token,
         &recipient,
         &1_000_000i128,
+<<<<<<< feature/plan-versioning
+        &soroban_sdk::String::from_str(&test_env.env, "rec_2"),
+        &RecoveryReason::UserOverpayment,
+=======
         &String::from_str(&test_env.env, "rec_2"),
         &RecoveryReason::AccidentalTransfer,
+>>>>>>> main
     );
     test_env.client.rotate_admin(&new_admin, &next_admin);
     assert_eq!(test_env.client.get_admin(), next_admin);
@@ -6583,6 +6718,35 @@ fn test_pause_with_varying_intervals() {
     let s2 = Address::generate(&test_env.env);
     let s3 = Address::generate(&test_env.env);
 
+<<<<<<< feature/plan-versioning
+    let id1 = test_env.client.create_subscription(
+        &s1,
+        &m,
+        &AMOUNT,
+        &daily,
+        &false,
+        &None::<i128>,
+        &None::<u64>,
+    );
+    let id2 = test_env.client.create_subscription(
+        &s2,
+        &m,
+        &AMOUNT,
+        &weekly,
+        &false,
+        &None::<i128>,
+        &None::<u64>,
+    );
+    let id3 = test_env.client.create_subscription(
+        &s3,
+        &m,
+        &AMOUNT,
+        &monthly,
+        &false,
+        &None::<i128>,
+        &None::<u64>,
+    );
+=======
     let id1 = test_env
         .client
         .create_subscription(&s1, &m, &AMOUNT, &daily, &false, &None::<i128>, &None::<u64>);
@@ -6593,6 +6757,7 @@ fn test_pause_with_varying_intervals() {
         test_env
             .client
             .create_subscription(&s3, &m, &AMOUNT, &monthly, &false, &None::<i128>, &None::<u64>);
+>>>>>>> main
 
     // All three should pause without error regardless of interval.
     test_env.client.pause_subscription(&id1, &s1);

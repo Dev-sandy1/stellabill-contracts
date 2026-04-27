@@ -433,6 +433,8 @@ pub struct PlanTemplate {
     pub template_key: u32,
     /// Monotonic version number within the template group (starts at 1).
     pub version: u32,
+    /// Whether this plan has been disabled from accepting new subscriptions.
+    pub is_disabled: bool,
 }
 
 /// Result of computing next charge information for a subscription.
@@ -979,6 +981,18 @@ pub struct PlanTemplateUpdatedEvent {
     /// Merchant that owns this plan template.
     pub merchant: Address,
     /// Timestamp when the update occurred.
+    pub timestamp: u64,
+}
+
+/// Event emitted when a plan template is disabled.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PlanTemplateDisabledEvent {
+    /// The ID of the plan template that was disabled.
+    pub plan_template_id: u32,
+    /// Merchant that owns this plan template.
+    pub merchant: Address,
+    /// Timestamp when disabled.
     pub timestamp: u64,
 }
 
